@@ -2,7 +2,7 @@
 
 Talon is a macOS Herdr plugin for selecting visible terminal values with keyboard hints. It is a Rust implementation inspired by tmux-fingers.
 
-Press `prefix+g`. Talon freezes the current tab into a temporary overlay and labels targets in the focused pane. Type a hint to act on its target.
+Press `prefix+g`. Talon freezes the current tab into a temporary overlay and labels targets in the focused pane. Type a hint to act on its target, or press `prefix+g` again to close the picker.
 
 ## Keys
 
@@ -12,6 +12,7 @@ Press `prefix+g`. Talon freezes the current tab into a temporary overlay and lab
 | `Shift` + final hint key | Copy, then paste into the originating pane without Enter |
 | `Ctrl` + final hint key | Copy, then open with macOS `open` |
 | `Tab`, hints, `Tab` | Copy multiple targets, joined by spaces |
+| `prefix+g` | Close the open picker |
 | `Esc`, `q`, or `Ctrl-c` | Cancel |
 
 Multi-select keeps selection order and ignores duplicate selections. A terminal resize cancels the picker because its frozen geometry is no longer valid.

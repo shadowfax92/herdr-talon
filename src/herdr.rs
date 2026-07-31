@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use std::ffi::{OsStr, OsString};
-use std::process::Command;
+use std::process::{Command, Output};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -67,6 +67,12 @@ pub struct Herdr {
     binary: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClosePluginPaneOutcome {
+    Closed,
+    NotFound,
+}
+
 impl Herdr {
     pub fn new(binary: impl Into<PathBuf>) -> Self {
         Self {
@@ -112,9 +118,9 @@ impl Herdr {
         String::from_utf8(output).context("Herdr pane read returned non-UTF-8 output")
     }
 
-    pub fn open_picker(&self, run_id: &str) -> Result<()> {
+    pub fn open_picker(&self, run_id: &str) -> Result<String> {
         let environment = format!("HERDR_TALON_RUN_ID={run_id}");
-        self.output([
+        let response: PluginPaneOpenEnvelope = self.json([
             OsStr::new("plugin"),
             OsStr::new("pane"),
             OsStr::new("open"),
@@ -127,7 +133,39 @@ impl Herdr {
             OsStr::new("--env"),
             OsStr::new(&environment),
         ])?;
-        Ok(())
+        let pane_id = response.result.plugin_pane.pane.pane_id;
+        if pane_id.is_empty() || pane_id.chars().any(char::is_control) {
+            bail!("Herdr returned an invalid picker pane ID");
+        }
+        Ok(pane_id)
+    }
+
+    pub fn close_plugin_pane(&self, pane_id: &str) -> Result<ClosePluginPaneOutcome> {
+        let output = self.command([
+            OsStr::new("plugin"),
+            OsStr::new("pane"),
+            OsStr::new("close"),
+            OsStr::new(pane_id),
+        ])?;
+        if output.status.success() {
+            let response: PluginPaneCloseEnvelope = serde_json::from_slice(&output.stdout)
+                .context("failed to decode Herdr plugin pane close response")?;
+            if response.result.pane_id != pane_id {
+                bail!("Herdr closed an unexpected plugin pane");
+            }
+            return Ok(ClosePluginPaneOutcome::Closed);
+        }
+        if serde_json::from_slice::<ErrorEnvelope>(&output.stderr)
+            .is_ok_and(|response| response.error.code == "plugin_pane_not_found")
+        {
+            return Ok(ClosePluginPaneOutcome::NotFound);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "Herdr command failed with {}: {}",
+            output.status,
+            stderr.trim()
+        );
     }
 
     pub fn notify(&self, body: &str) -> Result<()> {
@@ -172,14 +210,7 @@ impl Herdr {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let args = args
-            .into_iter()
-            .map(|value| value.as_ref().to_os_string())
-            .collect::<Vec<OsString>>();
-        let output = Command::new(&self.binary)
-            .args(&args)
-            .output()
-            .with_context(|| format!("failed to run {}", self.binary.display()))?;
+        let output = self.command(args)?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!(
@@ -189,6 +220,21 @@ impl Herdr {
             );
         }
         Ok(output.stdout)
+    }
+
+    fn command<I, S>(&self, args: I) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let args = args
+            .into_iter()
+            .map(|value| value.as_ref().to_os_string())
+            .collect::<Vec<OsString>>();
+        Command::new(&self.binary)
+            .args(&args)
+            .output()
+            .with_context(|| format!("failed to run {}", self.binary.display()))
     }
 }
 
@@ -222,6 +268,46 @@ struct RawPaneInfo {
 #[derive(Deserialize)]
 struct RawScroll {
     viewport_rows: u64,
+}
+
+#[derive(Deserialize)]
+struct PluginPaneOpenEnvelope {
+    result: PluginPaneOpenResult,
+}
+
+#[derive(Deserialize)]
+struct PluginPaneOpenResult {
+    plugin_pane: RawPluginPane,
+}
+
+#[derive(Deserialize)]
+struct RawPluginPane {
+    pane: RawPluginPaneInfo,
+}
+
+#[derive(Deserialize)]
+struct RawPluginPaneInfo {
+    pane_id: String,
+}
+
+#[derive(Deserialize)]
+struct PluginPaneCloseEnvelope {
+    result: PluginPaneCloseResult,
+}
+
+#[derive(Deserialize)]
+struct PluginPaneCloseResult {
+    pane_id: String,
+}
+
+#[derive(Deserialize)]
+struct ErrorEnvelope {
+    error: ErrorBody,
+}
+
+#[derive(Deserialize)]
+struct ErrorBody {
+    code: String,
 }
 
 #[cfg(test)]

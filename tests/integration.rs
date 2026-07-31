@@ -29,7 +29,16 @@ elif [ "$1 $2" = "pane read" ]; then
     if [ "$format" = "ansi" ]; then printf '\033[32mother\033[0m\n'; else printf 'other\n'; fi
   fi
 elif [ "$1 $2 $3" = "plugin pane open" ]; then
-  printf '%s\n' '{"id":"cli:plugin","result":{"type":"plugin_pane_opened"}}'
+  : > "$0.pane-open"
+  printf '%s\n' '{"id":"cli:plugin","result":{"type":"plugin_pane_opened","plugin_pane":{"plugin_id":"shadowfax.talon","entrypoint":"picker","pane":{"pane_id":"w1:p3"}}}}'
+elif [ "$1 $2 $3" = "plugin pane close" ]; then
+  if [ -e "$0.pane-open" ]; then
+    rm "$0.pane-open"
+    printf '%s\n' '{"id":"cli:plugin","result":{"type":"plugin_pane_closed","pane_id":"w1:p3"}}'
+  else
+    printf '%s\n' '{"id":"cli:plugin","error":{"code":"plugin_pane_not_found","message":"plugin pane not found"}}' >&2
+    exit 1
+  fi
 elif [ "$1 $2" = "notification show" ]; then
   printf '%s\n' '{"result":{"type":"ok"}}'
 else
@@ -44,6 +53,71 @@ fi
     std::fs::set_permissions(&binary, permissions).unwrap();
     let herdr = Herdr::new(&binary);
     (dir, herdr)
+}
+
+#[test]
+fn second_launch_closes_the_existing_picker_before_reading_its_layout() {
+    let (fake_dir, herdr) = fake_herdr();
+    let state = tempdir().unwrap();
+    let store = RunStore::new(state.path()).unwrap();
+    let source_context = InvocationContext::parse(
+        r#"{"focused_pane_id":"w1:p1","focused_pane_cwd":"/tmp/project"}"#,
+    )
+    .unwrap();
+    let picker_context = InvocationContext::parse(r#"{"focused_pane_id":"w1:p3"}"#).unwrap();
+
+    let first = launch(&herdr, &source_context, &Config::default(), &store).unwrap();
+    assert!(matches!(first, LaunchOutcome::Opened { .. }));
+    let second = launch(&herdr, &picker_context, &Config::default(), &store).unwrap();
+    assert_eq!(
+        second,
+        LaunchOutcome::Closed {
+            pane_id: "w1:p3".into()
+        }
+    );
+
+    let log = std::fs::read_to_string(fake_dir.path().join("herdr.log")).unwrap();
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.starts_with("plugin pane open "))
+            .count(),
+        1
+    );
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.starts_with("pane layout "))
+            .count(),
+        1
+    );
+    assert!(log.lines().any(|line| line == "plugin pane close w1:p3"));
+}
+
+#[test]
+fn a_stale_picker_record_is_replaced_after_the_pane_has_closed() {
+    let (fake_dir, herdr) = fake_herdr();
+    let state = tempdir().unwrap();
+    let store = RunStore::new(state.path()).unwrap();
+    let context = InvocationContext::parse(r#"{"focused_pane_id":"w1:p1"}"#).unwrap();
+
+    let LaunchOutcome::Opened { run_id } =
+        launch(&herdr, &context, &Config::default(), &store).unwrap()
+    else {
+        panic!("expected first overlay launch");
+    };
+    store.claim(&run_id).unwrap();
+    std::fs::remove_file(fake_dir.path().join("herdr.pane-open")).unwrap();
+
+    let second = launch(&herdr, &context, &Config::default(), &store).unwrap();
+    assert!(matches!(second, LaunchOutcome::Opened { .. }));
+
+    let log = std::fs::read_to_string(fake_dir.path().join("herdr.log")).unwrap();
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.starts_with("plugin pane open "))
+            .count(),
+        2
+    );
+    assert!(log.lines().any(|line| line == "plugin pane close w1:p3"));
 }
 
 #[test]
