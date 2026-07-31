@@ -1,0 +1,22 @@
+alphabet = "asdfwerzxvjkluopghtyb"
+enabled_builtin_patterns = [
+  "ip",
+  "uuid",
+  "sha",
+  "digit",
+  "url",
+  "path",
+  "hex",
+  "kubernetes",
+  "git-status",
+  "git-status-branch",
+  "diff",
+]
+
+[[patterns]]
+name = "ticket"
+regex = "TKT-[0-9]+"
+
+[[patterns]]
+name = "captured-ticket"
+regex = "ticket=(?<match>TKT-[0-9]+)"

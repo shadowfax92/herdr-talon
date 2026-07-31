@@ -1,0 +1,22 @@
+[package]
+name = "herdr-talon"
+version = "0.1.0"
+edition = "2021"
+description = "Spatial keyboard hints for visible Herdr terminal targets"
+license = "MIT"
+
+[dependencies]
+ansi-to-tui = "8.0.1"
+anyhow = "1.0"
+clap = { version = "4.6", features = ["derive"] }
+ratatui = "0.30.0"
+regex = "1.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "1.1"
+toml_edit = "0.24"
+unicode-width = "0.2"
+uuid = { version = "1.22", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3.23"
