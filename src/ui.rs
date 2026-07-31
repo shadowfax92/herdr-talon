@@ -114,16 +114,18 @@ fn render_targets(buffer: &mut Buffer, content: Rect, snapshot: &RunSnapshot, st
         let selected = state.selected().contains(&index);
         let highlight = if selected {
             Style::default()
-                .fg(Color::Cyan)
+                .fg(Color::Black)
+                .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(Color::Black).bg(Color::Yellow)
         };
         let hint = if selected {
             highlight
         } else {
             Style::default()
-                .fg(Color::Green)
+                .fg(Color::Black)
+                .bg(Color::Green)
                 .add_modifier(Modifier::BOLD)
         };
         for occurrence in &target.occurrences {
@@ -242,9 +244,11 @@ mod tests {
         assert_eq!(buffer[(0, 0)].symbol(), "X");
         assert_eq!(buffer[(0, 0)].fg, Color::Red);
         assert_eq!(buffer[(2, 0)].symbol(), "a");
-        assert_eq!(buffer[(2, 0)].fg, Color::Green);
+        assert_eq!(buffer[(2, 0)].fg, Color::Black);
+        assert_eq!(buffer[(2, 0)].bg, Color::Green);
         assert!(buffer[(2, 0)].modifier.contains(Modifier::BOLD));
-        assert_eq!(buffer[(3, 0)].fg, Color::Yellow);
+        assert_eq!(buffer[(3, 0)].fg, Color::Black);
+        assert_eq!(buffer[(3, 0)].bg, Color::Yellow);
     }
 
     #[test]
@@ -266,8 +270,10 @@ mod tests {
 
         render(area, &mut buffer, &snapshot, &state);
 
-        assert_eq!(buffer[(2, 0)].fg, Color::Cyan);
-        assert_eq!(buffer[(3, 0)].fg, Color::Cyan);
+        assert_eq!(buffer[(2, 0)].fg, Color::Black);
+        assert_eq!(buffer[(2, 0)].bg, Color::Cyan);
+        assert_eq!(buffer[(3, 0)].fg, Color::Black);
+        assert_eq!(buffer[(3, 0)].bg, Color::Cyan);
     }
 
     #[test]
