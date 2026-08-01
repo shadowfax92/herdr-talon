@@ -87,6 +87,10 @@ Add ordered regular expressions with `[[patterns]]`:
 
 ```toml
 [[patterns]]
+name = "hostname"
+regex = '(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b'
+
+[[patterns]]
 name = "ticket"
 regex = "TKT-[0-9]+"
 
@@ -96,6 +100,8 @@ regex = "ticket=(?<match>TKT-[0-9]+)"
 ```
 
 When a regex has a named `match` capture, Talon labels and copies only that capture. Configuration is loaded on every launch, so plugin-config edits do not require a Herdr reload.
+
+The included example keeps the tmux-fingers-style Git SSH, UUID, SHA, file:line, and hostname rules in configuration rather than compiling them into Talon.
 
 ## How it works
 

@@ -112,6 +112,7 @@ fn saturating_u16(value: usize) -> u16 {
 #[cfg(test)]
 mod tests {
     use crate::config::Config;
+    use tempfile::tempdir;
 
     use super::*;
 
@@ -189,18 +190,6 @@ mod tests {
     fn approved_defaults_match_representative_values() {
         let config = Config::default();
         let cases = [
-            (
-                "git-ssh",
-                "git@github.com:owner/repo.git",
-                "git@github.com:owner/repo.git",
-            ),
-            (
-                "user-uuid",
-                "123e4567-e89b-12d3-a456-426614174000",
-                "123e4567-e89b-12d3-a456-426614174000",
-            ),
-            ("user-sha", "deadbeef", "deadbeef"),
-            ("file-line", "/tmp/main.rs:42", "/tmp/main.rs:42"),
             ("ip", "10.0.0.1", "10.0.0.1"),
             ("digit", "ticket 1234", "1234"),
             ("url", "https://herdr.dev/docs/", "https://herdr.dev/docs/"),
@@ -225,5 +214,50 @@ mod tests {
             let targets = find_targets(input, std::slice::from_ref(definition)).unwrap();
             assert_eq!(targets[0].text, expected, "pattern {name}");
         }
+    }
+
+    #[test]
+    fn example_config_provides_fingers_compatible_patterns() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, include_str!("../talon.toml.example")).unwrap();
+        let config = Config::load(&path).unwrap();
+        let cases = [
+            (
+                "git-ssh",
+                "git@example.test:owner/repo.git",
+                "git@example.test:owner/repo.git",
+            ),
+            (
+                "user-uuid",
+                "123e4567-e89b-12d3-a456-426614174000",
+                "123e4567-e89b-12d3-a456-426614174000",
+            ),
+            ("user-sha", "deadbeef", "deadbeef"),
+            ("file-line", "/tmp/main.rs:42", "/tmp/main.rs:42"),
+        ];
+
+        for (name, input, expected) in cases {
+            let definition = config
+                .patterns
+                .iter()
+                .find(|pattern| pattern.name == name)
+                .unwrap();
+            let targets = find_targets(input, std::slice::from_ref(definition)).unwrap();
+            assert_eq!(targets[0].text, expected, "pattern {name}");
+        }
+
+        let targets = find_targets(
+            "Your VMs:\n  • atlas-node.example.test - running (example/runtime)\n  • comet-node.example.test - running (example/runtime)",
+            &config.patterns,
+        )
+        .unwrap();
+        let values = targets
+            .iter()
+            .map(|target| target.text.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(values.contains(&"atlas-node.example.test"));
+        assert!(values.contains(&"comet-node.example.test"));
     }
 }

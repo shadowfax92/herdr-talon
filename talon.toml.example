@@ -14,6 +14,26 @@ enabled_builtin_patterns = [
 ]
 
 [[patterns]]
+name = "git-ssh"
+regex = 'git@[a-zA-Z0-9.-]+:[a-zA-Z0-9/.-]+\.git'
+
+[[patterns]]
+name = "user-uuid"
+regex = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+
+[[patterns]]
+name = "user-sha"
+regex = '[0-9a-f]{7,40}'
+
+[[patterns]]
+name = "file-line"
+regex = '/[^ \t\r\n]+:[0-9]+'
+
+[[patterns]]
+name = "hostname"
+regex = '(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b'
+
+[[patterns]]
 name = "ticket"
 regex = "TKT-[0-9]+"
 

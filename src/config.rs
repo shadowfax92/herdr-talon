@@ -7,16 +7,6 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_ALPHABET: &str = "asdfwerzxvjkluopghtyb";
 
-const USER_PATTERNS: &[(&str, &str)] = &[
-    ("git-ssh", r"git@[a-zA-Z0-9.-]+:[a-zA-Z0-9/.-]+\.git"),
-    (
-        "user-uuid",
-        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-    ),
-    ("user-sha", r"[0-9a-f]{7,40}"),
-    ("file-line", r"/[^ \t\r\n]+:[0-9]+"),
-];
-
 const BUILTIN_PATTERNS: &[(&str, &str)] = &[
     ("ip", r"\d{1,3}(?:\.\d{1,3}){3}"),
     (
@@ -62,9 +52,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             alphabet: DEFAULT_ALPHABET.chars().collect(),
-            patterns: definitions(USER_PATTERNS)
-                .chain(definitions(BUILTIN_PATTERNS))
-                .collect(),
+            patterns: definitions(BUILTIN_PATTERNS).collect(),
         }
     }
 }
@@ -93,7 +81,6 @@ impl Config {
                 .collect()
         });
         let mut patterns = file.patterns;
-        patterns.extend(definitions(USER_PATTERNS));
         for name in enabled {
             let Some((_, source)) = BUILTIN_PATTERNS
                 .iter()
@@ -179,10 +166,6 @@ mod tests {
             .collect::<HashSet<_>>();
 
         for expected in [
-            "git-ssh",
-            "user-uuid",
-            "user-sha",
-            "file-line",
             "ip",
             "uuid",
             "sha",
