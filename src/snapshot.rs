@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufReader, BufWriter, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -11,7 +12,7 @@ use uuid::Uuid;
 use crate::config::Config;
 use crate::herdr::{ClosePluginPaneOutcome, Herdr, InvocationContext, Layout};
 use crate::hints::generate_hints;
-use crate::matcher::{find_targets, Target};
+use crate::matcher::{find_targets, Occurrence};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PaneSnapshot {
@@ -22,13 +23,54 @@ pub struct PaneSnapshot {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TargetOccurrence {
+    pub pane_id: String,
+    pub occurrence: Occurrence,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TabTarget {
+    pub text: String,
+    pub occurrences: Vec<TargetOccurrence>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RunSnapshot {
     pub source_pane_id: String,
     pub source_cwd: Option<String>,
     pub layout: Layout,
     pub panes: Vec<PaneSnapshot>,
-    pub targets: Vec<Target>,
+    pub targets: Vec<TabTarget>,
     pub hints: Vec<String>,
+}
+
+fn find_tab_targets(panes: &[PaneSnapshot], config: &Config) -> Result<Vec<TabTarget>> {
+    let mut targets = Vec::<TabTarget>::new();
+    let mut target_by_text = HashMap::<String, usize>::new();
+
+    for pane in panes {
+        for target in find_targets(&pane.text, &config.patterns)? {
+            let occurrences = target
+                .occurrences
+                .into_iter()
+                .map(|occurrence| TargetOccurrence {
+                    pane_id: pane.pane_id.clone(),
+                    occurrence,
+                });
+            if let Some(index) = target_by_text.get(&target.text).copied() {
+                targets[index].occurrences.extend(occurrences);
+            } else {
+                let index = targets.len();
+                target_by_text.insert(target.text.clone(), index);
+                targets.push(TabTarget {
+                    text: target.text,
+                    occurrences: occurrences.collect(),
+                });
+            }
+        }
+    }
+
+    Ok(targets)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -282,13 +324,9 @@ pub fn launch(
         });
     }
 
-    let source = panes
-        .iter()
-        .find(|pane| pane.pane_id == source_pane_id)
-        .context("focused pane snapshot is missing")?;
-    let targets = find_targets(&source.text, &config.patterns)?;
+    let targets = find_tab_targets(&panes, config)?;
     if targets.is_empty() {
-        herdr.notify("No targets in the visible pane")?;
+        herdr.notify("No targets in the visible tab")?;
         return Ok(LaunchOutcome::NoMatches);
     }
     let hints = generate_hints(&config.alphabet, targets.len())?;
@@ -335,8 +373,7 @@ pub fn launch_with_reporting(
 }
 
 pub fn launch_from_environment() -> Result<LaunchOutcome> {
-    let binary = std::env::var_os("HERDR_BIN_PATH").unwrap_or_else(|| "herdr".into());
-    let herdr = Herdr::new(binary);
+    let herdr = Herdr::from_environment();
     let context = std::env::var("HERDR_PLUGIN_CONTEXT_JSON")
         .context("HERDR_PLUGIN_CONTEXT_JSON is not set")?;
     let config_dir = std::env::var_os("HERDR_PLUGIN_CONFIG_DIR")
@@ -362,7 +399,7 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::herdr::{LayoutPane, Rect};
-    use crate::matcher::{Occurrence, Target};
+    use crate::matcher::Occurrence;
 
     use super::*;
 
@@ -398,14 +435,17 @@ mod tests {
                 text: "deadbeef\n".into(),
                 ansi: "\u{1b}[33mdeadbeef\u{1b}[0m\n".into(),
             }],
-            targets: vec![Target {
+            targets: vec![TabTarget {
                 text: "deadbeef".into(),
-                occurrences: vec![Occurrence {
-                    row: 0,
-                    highlight_col: 0,
-                    highlight_width: 8,
-                    hint_col: 0,
-                    hint_width: 8,
+                occurrences: vec![TargetOccurrence {
+                    pane_id: "w1:p1".into(),
+                    occurrence: Occurrence {
+                        row: 0,
+                        highlight_col: 0,
+                        highlight_width: 8,
+                        hint_col: 0,
+                        hint_width: 8,
+                    },
                 }],
             }],
             hints: vec!["a".into()],

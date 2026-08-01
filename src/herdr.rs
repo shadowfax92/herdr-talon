@@ -74,6 +74,10 @@ pub enum ClosePluginPaneOutcome {
 }
 
 impl Herdr {
+    pub fn from_environment() -> Self {
+        Self::new(runtime_binary(std::env::var_os("HERDR_BIN_PATH")))
+    }
+
     pub fn new(binary: impl Into<PathBuf>) -> Self {
         Self {
             binary: binary.into(),
@@ -238,6 +242,13 @@ impl Herdr {
     }
 }
 
+fn runtime_binary(injected: Option<OsString>) -> OsString {
+    match injected {
+        Some(binary) if !Path::new(&binary).is_absolute() || Path::new(&binary).is_file() => binary,
+        _ => OsString::from("herdr"),
+    }
+}
+
 #[derive(Deserialize)]
 struct LayoutEnvelope {
     result: LayoutResult,
@@ -313,6 +324,7 @@ struct ErrorBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn invocation_context_requires_a_nonempty_focused_pane() {
@@ -332,5 +344,25 @@ mod tests {
             .source_pane_id()
             .is_err());
         assert!(InvocationContext::parse("not-json").is_err());
+    }
+
+    #[test]
+    fn missing_injected_binary_falls_back_to_path_lookup() {
+        let dir = tempdir().unwrap();
+        let existing = dir.path().join("herdr-existing");
+        std::fs::write(&existing, "").unwrap();
+
+        assert_eq!(
+            runtime_binary(Some(existing.clone().into_os_string())),
+            existing.into_os_string()
+        );
+        assert_eq!(
+            runtime_binary(Some(dir.path().join("herdr-missing").into_os_string())),
+            OsString::from("herdr")
+        );
+        assert_eq!(
+            runtime_binary(Some(OsString::from("herdr-custom"))),
+            OsString::from("herdr-custom")
+        );
     }
 }

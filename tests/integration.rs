@@ -26,7 +26,7 @@ elif [ "$1 $2" = "pane read" ]; then
   if [ "$pane" = "w1:p1" ]; then
     if [ "$format" = "ansi" ]; then printf '\033[33mdeadbeef\033[0m\n'; else printf 'deadbeef\n'; fi
   else
-    if [ "$format" = "ansi" ]; then printf '\033[32mother\033[0m\n'; else printf 'other\n'; fi
+    if [ "$format" = "ansi" ]; then printf '\033[33mdeadbeef\033[0m \033[32mhttps://pane-two.test/docs\033[0m\n'; else printf 'deadbeef https://pane-two.test/docs\n'; fi
   fi
 elif [ "$1 $2 $3" = "plugin pane open" ]; then
   : > "$0.pane-open"
@@ -140,7 +140,23 @@ fn launch_captures_every_pane_and_opens_the_declared_overlay() {
     assert_eq!(snapshot.source_pane_id, "w1:p1");
     assert_eq!(snapshot.panes.len(), 2);
     assert_eq!(snapshot.panes[0].viewport_rows, 8);
-    assert_eq!(snapshot.targets[0].text, "deadbeef");
+    assert_eq!(
+        snapshot
+            .targets
+            .iter()
+            .map(|target| target.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["deadbeef", "https://pane-two.test/docs"]
+    );
+    assert_eq!(
+        snapshot.targets[0]
+            .occurrences
+            .iter()
+            .map(|occurrence| occurrence.pane_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["w1:p1", "w1:p2"]
+    );
+    assert_eq!(snapshot.targets[1].occurrences[0].pane_id, "w1:p2");
     assert_eq!(snapshot.hints.len(), snapshot.targets.len());
     assert!(log.contains("pane read w1:p1 --source visible --format text"));
     assert!(log.contains("pane read w1:p2 --source visible --format ansi"));
@@ -167,7 +183,7 @@ fn no_matches_notifies_without_opening_or_writing_a_handoff() {
     let log = std::fs::read_to_string(fake_dir.path().join("herdr.log")).unwrap();
 
     assert_eq!(outcome, LaunchOutcome::NoMatches);
-    assert!(log.contains("notification show Talon --body No targets in the visible pane"));
+    assert!(log.contains("notification show Talon --body No targets in the visible tab"));
     assert!(!log.contains("plugin pane open"));
     assert_eq!(std::fs::read_dir(store.root()).unwrap().count(), 0);
 }

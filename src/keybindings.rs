@@ -23,8 +23,7 @@ pub enum InstallOutcome {
 pub fn install_from_environment() -> Result<InstallOutcome> {
     let path = config_path_from_environment()?;
     let outcome = install(&path)?;
-    let binary = std::env::var_os("HERDR_BIN_PATH").unwrap_or_else(|| "herdr".into());
-    let herdr = Herdr::new(binary);
+    let herdr = Herdr::from_environment();
     match &outcome {
         InstallOutcome::Updated { .. } => {
             herdr.reload_config()?;

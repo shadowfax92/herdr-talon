@@ -120,7 +120,6 @@ impl PickerState {
     pub fn handle_event(&mut self, event: Event, targets: &[String]) -> InputOutcome {
         match event {
             Event::Key(key) => self.handle_key(key, targets),
-            Event::Resize(_, _) => InputOutcome::Cancel,
             _ => InputOutcome::Continue,
         }
     }
@@ -242,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_keys_and_resize_release_without_an_action() {
+    fn cancel_keys_release_without_an_action_and_resize_is_deferred() {
         for key in [
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
             key('q', KeyModifiers::NONE),
@@ -262,7 +261,7 @@ mod tests {
         );
         assert_eq!(
             state.handle_event(Event::Resize(100, 40), &targets()),
-            InputOutcome::Cancel
+            InputOutcome::Continue
         );
     }
 

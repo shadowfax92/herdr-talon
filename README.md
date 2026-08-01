@@ -12,7 +12,7 @@
 
 </div>
 
-Press `prefix+g` and Talon freezes the current Herdr tab into a temporary overlay. Recognized targets in the focused pane receive compact hints; type a hint to copy, paste, open, or collect its value without reaching for the mouse.
+Press `prefix+g` and Talon freezes the current Herdr tab into a temporary overlay. Recognized targets across every visible pane receive compact hints; type a hint to copy, paste, open, or collect its value without reaching for the mouse.
 
 - **Spatial hints** — labels appear directly beside paths, URLs, hashes, IPs, and other useful values.
 - **Progressive matching** — hints narrow as you type and stay short for common target counts.
@@ -53,7 +53,7 @@ Existing config is preserved. Before changing it, Talon writes a sibling `config
 | `prefix+g` | Close the active picker |
 | `Esc`, `q`, or `Ctrl-c` | Cancel |
 
-Multi-select preserves selection order and ignores duplicates. Resizing the terminal cancels the picker because the frozen source geometry is no longer valid.
+Multi-select preserves selection order and ignores duplicates. Resizing the terminal cancels the picker because the frozen tab geometry is no longer valid. Internal pane resizes while Herdr opens the overlay are ignored.
 
 ## Recognized targets
 
@@ -99,7 +99,7 @@ When a regex has a named `match` capture, Talon labels and copies only that capt
 
 ## How it works
 
-Talon asks Herdr for the visible tab layout and rendered pane contents, records a private one-shot handoff, and opens its picker as a native Herdr overlay. The picker paints the frozen ANSI backdrop, adds hint labels only to the originating pane, and deletes the handoff after claiming it.
+Talon asks Herdr for the visible tab layout and rendered pane contents, records a private one-shot handoff, and opens its picker as a native Herdr overlay. The picker paints the frozen ANSI backdrop, adds hint labels across the tab, and deletes the handoff after claiming it.
 
 Completions are deliberately narrow:
 
@@ -109,7 +109,7 @@ Completions are deliberately narrow:
 
 ## Limits
 
-Talon works from Herdr's visible-pane API. It does not inspect scrollback, preserve Copy mode, jump the source pane, or execute arbitrary shell actions. Output arriving after launch is intentionally absent from the frozen overlay. Neighboring panes remain visible for context, but only the pane that launched Talon receives hints.
+Talon works from Herdr's visible-pane API. It does not inspect scrollback, preserve Copy mode, jump the source pane, or execute arbitrary shell actions. Output arriving after launch is intentionally absent from the frozen overlay.
 
 ## Local development
 

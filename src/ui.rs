@@ -29,7 +29,6 @@ impl Widget for TalonView<'_> {
 
 pub fn render(area: Rect, buffer: &mut Buffer, snapshot: &RunSnapshot, state: &PickerState) {
     buffer.reset();
-    let mut source_content = None;
     for layout_pane in &snapshot.layout.panes {
         let Some(pane) = snapshot
             .panes
@@ -60,14 +59,9 @@ pub fn render(area: Rect, buffer: &mut Buffer, snapshot: &RunSnapshot, state: &P
             .into_text()
             .unwrap_or_else(|_| Text::raw(pane.text.clone()));
         (&text).render(content, buffer);
-        if pane.pane_id == snapshot.source_pane_id {
-            source_content = Some(content);
-        }
+        render_targets(buffer, content, &pane.pane_id, snapshot, state);
     }
 
-    if let Some(content) = source_content {
-        render_targets(buffer, content, snapshot, state);
-    }
     render_status(buffer, area, state);
 }
 
@@ -106,7 +100,13 @@ fn content_rect(outer: Rect, viewport_rows: u16) -> (Rect, bool) {
     )
 }
 
-fn render_targets(buffer: &mut Buffer, content: Rect, snapshot: &RunSnapshot, state: &PickerState) {
+fn render_targets(
+    buffer: &mut Buffer,
+    content: Rect,
+    pane_id: &str,
+    snapshot: &RunSnapshot,
+    state: &PickerState,
+) {
     for (index, target) in snapshot.targets.iter().enumerate() {
         if !state.is_visible(index) {
             continue;
@@ -128,7 +128,11 @@ fn render_targets(buffer: &mut Buffer, content: Rect, snapshot: &RunSnapshot, st
                 .bg(Color::Green)
                 .add_modifier(Modifier::BOLD)
         };
-        for occurrence in &target.occurrences {
+        for located in &target.occurrences {
+            if located.pane_id != pane_id {
+                continue;
+            }
+            let occurrence = &located.occurrence;
             let y = content.y.saturating_add(occurrence.row);
             let start = content.x.saturating_add(occurrence.highlight_col);
             let end = start
@@ -181,8 +185,8 @@ mod tests {
     use ratatui::style::{Color, Modifier};
 
     use crate::herdr::{Layout, LayoutPane, Rect as HerdrRect};
-    use crate::matcher::{Occurrence, Target};
-    use crate::snapshot::PaneSnapshot;
+    use crate::matcher::Occurrence;
+    use crate::snapshot::{PaneSnapshot, TabTarget, TargetOccurrence};
 
     use super::*;
 
@@ -218,14 +222,17 @@ mod tests {
                 text: "X deadbeef\n".into(),
                 ansi: "\u{1b}[31mX deadbeef\u{1b}[0m\n".into(),
             }],
-            targets: vec![Target {
+            targets: vec![TabTarget {
                 text: "deadbeef".into(),
-                occurrences: vec![Occurrence {
-                    row: 0,
-                    highlight_col: 2,
-                    highlight_width: 8,
-                    hint_col: 2,
-                    hint_width: 8,
+                occurrences: vec![TargetOccurrence {
+                    pane_id: "w1:p1".into(),
+                    occurrence: Occurrence {
+                        row: 0,
+                        highlight_col: 2,
+                        highlight_width: 8,
+                        hint_col: 2,
+                        hint_width: 8,
+                    },
                 }],
             }],
             hints: vec!["a".into()],
@@ -301,5 +308,52 @@ mod tests {
         assert_eq!(buffer[(0, 0)].symbol(), "┌");
         assert_eq!(buffer[(1, 1)].symbol(), "X");
         assert_eq!(buffer[(3, 1)].symbol(), "a");
+    }
+
+    #[test]
+    fn targets_render_in_every_visible_pane() {
+        let mut snapshot = snapshot();
+        snapshot.layout.area.width = 24;
+        snapshot.layout.panes[0].rect.width = 12;
+        snapshot.layout.panes.push(LayoutPane {
+            pane_id: "w1:p2".into(),
+            focused: false,
+            rect: HerdrRect {
+                x: 42,
+                y: 1,
+                width: 12,
+                height: 3,
+            },
+        });
+        snapshot.panes.push(PaneSnapshot {
+            pane_id: "w1:p2".into(),
+            viewport_rows: 3,
+            text: "Y cafebabe\n".into(),
+            ansi: "\u{1b}[34mY cafebabe\u{1b}[0m\n".into(),
+        });
+        snapshot.targets.push(TabTarget {
+            text: "cafebabe".into(),
+            occurrences: vec![TargetOccurrence {
+                pane_id: "w1:p2".into(),
+                occurrence: Occurrence {
+                    row: 0,
+                    highlight_col: 2,
+                    highlight_width: 8,
+                    hint_col: 2,
+                    hint_width: 8,
+                },
+            }],
+        });
+        snapshot.hints.push("s".into());
+        let state = PickerState::new(snapshot.hints.clone());
+        let area = Rect::new(0, 0, 24, 3);
+        let mut buffer = Buffer::empty(area);
+
+        render(area, &mut buffer, &snapshot, &state);
+
+        assert_eq!(buffer[(2, 0)].symbol(), "a");
+        assert_eq!(buffer[(14, 0)].symbol(), "s");
+        assert_eq!(buffer[(14, 0)].bg, Color::Green);
+        assert_eq!(buffer[(15, 0)].bg, Color::Yellow);
     }
 }

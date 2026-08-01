@@ -1,6 +1,4 @@
-use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use ratatui::crossterm::event::{self, Event};
@@ -11,43 +9,8 @@ use crate::herdr::Herdr;
 use crate::snapshot::{RunSnapshot, RunStore};
 use crate::ui::TalonView;
 
-const STARTUP_RESIZE_QUIET_PERIOD: Duration = Duration::from_millis(50);
-
-trait EventReader {
-    fn poll(&mut self, timeout: Duration) -> std::io::Result<bool>;
-    fn read(&mut self) -> std::io::Result<Event>;
-}
-
-struct CrosstermEvents;
-
-impl EventReader for CrosstermEvents {
-    fn poll(&mut self, timeout: Duration) -> std::io::Result<bool> {
-        event::poll(timeout)
-    }
-
-    fn read(&mut self) -> std::io::Result<Event> {
-        event::read()
-    }
-}
-
-fn drain_startup_resizes<E, F>(events: &mut E, mut autoresize: F) -> Result<VecDeque<Event>>
-where
-    E: EventReader,
-    F: FnMut() -> Result<()>,
-{
-    let mut pending = VecDeque::new();
-    while events.poll(STARTUP_RESIZE_QUIET_PERIOD)? {
-        match events.read()? {
-            Event::Resize(_, _) => autoresize()?,
-            event => pending.push_back(event),
-        }
-    }
-    Ok(pending)
-}
-
 pub fn run_from_environment() -> Result<()> {
-    let binary = std::env::var_os("HERDR_BIN_PATH").unwrap_or_else(|| "herdr".into());
-    let herdr = Herdr::new(binary);
+    let herdr = Herdr::from_environment();
     let result = (|| {
         let state_dir = std::env::var_os("HERDR_PLUGIN_STATE_DIR")
             .map(PathBuf::from)
@@ -62,7 +25,7 @@ pub fn run_from_environment() -> Result<()> {
                 snapshot.source_pane_id.clone(),
                 snapshot.source_cwd.as_deref().map(PathBuf::from),
             );
-            ratatui::run(|terminal| run_picker(terminal, &snapshot, &executor))
+            ratatui::run(|terminal| run_picker(terminal, &snapshot, &executor, &herdr))
         })();
         let cleanup_result = store.clear_active_picker(&run_id);
         picker_result?;
@@ -78,6 +41,7 @@ fn run_picker(
     terminal: &mut ratatui::DefaultTerminal,
     snapshot: &RunSnapshot,
     executor: &ActionExecutor,
+    herdr: &Herdr,
 ) -> Result<()> {
     let targets = snapshot
         .targets
@@ -85,20 +49,20 @@ fn run_picker(
         .map(|target| target.text.clone())
         .collect::<Vec<_>>();
     let mut state = PickerState::new(snapshot.hints.clone());
-    let mut events = CrosstermEvents;
-    let mut pending_events = drain_startup_resizes(&mut events, || {
-        terminal.autoresize()?;
-        Ok(())
-    })?;
 
     loop {
         terminal.draw(|frame| {
             frame.render_widget(TalonView::new(snapshot, &state), frame.area());
         })?;
-        let event = match pending_events.pop_front() {
-            Some(event) => event,
-            None => events.read()?,
-        };
+        let event = event::read()?;
+        if matches!(event, Event::Resize(_, _)) {
+            terminal.autoresize()?;
+            let current = herdr.layout(&snapshot.source_pane_id)?;
+            if tab_geometry_changed(snapshot, &current) {
+                return Ok(());
+            }
+            continue;
+        }
         match state.handle_event(event, &targets) {
             InputOutcome::Continue => {}
             InputOutcome::Cancel => return Ok(()),
@@ -110,54 +74,43 @@ fn run_picker(
     }
 }
 
+fn tab_geometry_changed(snapshot: &RunSnapshot, current: &crate::herdr::Layout) -> bool {
+    snapshot.layout.area != current.area
+}
+
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-
     use super::*;
 
-    struct FakeEvents {
-        events: VecDeque<Event>,
-        timeouts: Vec<Duration>,
-    }
-
-    impl EventReader for FakeEvents {
-        fn poll(&mut self, timeout: Duration) -> std::io::Result<bool> {
-            self.timeouts.push(timeout);
-            Ok(!self.events.is_empty())
-        }
-
-        fn read(&mut self) -> std::io::Result<Event> {
-            self.events
-                .pop_front()
-                .ok_or_else(|| std::io::Error::other("no event"))
-        }
-    }
-
     #[test]
-    fn startup_resizes_are_drained_without_dropping_the_first_input() {
-        let key = Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
-        let mut events = FakeEvents {
-            events: VecDeque::from([
-                Event::FocusGained,
-                Event::Resize(120, 72),
-                key.clone(),
-                Event::Resize(475, 70),
-            ]),
-            timeouts: Vec::new(),
+    fn only_a_real_tab_geometry_change_cancels_the_picker() {
+        let captured = crate::herdr::Layout {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+            zoomed: false,
+            area: crate::herdr::Rect {
+                x: 30,
+                y: 1,
+                width: 100,
+                height: 30,
+            },
+            focused_pane_id: "w1:p1".into(),
+            panes: Vec::new(),
         };
-        let mut autoresizes = 0;
+        let snapshot = RunSnapshot {
+            source_pane_id: "w1:p1".into(),
+            source_cwd: None,
+            layout: captured.clone(),
+            panes: Vec::new(),
+            targets: Vec::new(),
+            hints: Vec::new(),
+        };
+        let mut current = captured;
 
-        let pending = drain_startup_resizes(&mut events, || {
-            autoresizes += 1;
-            Ok(())
-        })
-        .unwrap();
+        current.zoomed = true;
+        assert!(!tab_geometry_changed(&snapshot, &current));
 
-        assert_eq!(autoresizes, 2);
-        assert_eq!(pending, VecDeque::from([Event::FocusGained, key]));
-        assert_eq!(events.timeouts, vec![STARTUP_RESIZE_QUIET_PERIOD; 5]);
+        current.area.width = 120;
+        assert!(tab_geometry_changed(&snapshot, &current));
     }
 }

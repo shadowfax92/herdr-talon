@@ -11,7 +11,7 @@ command = ["cargo", "build", "--release", "--locked"]
 [[actions]]
 id = "launch"
 title = "Open Talon"
-description = "Select a visible target in the focused pane."
+description = "Select a visible target anywhere in the focused tab."
 contexts = ["pane"]
 command = ["./target/release/herdr-talon", "launch"]
 
