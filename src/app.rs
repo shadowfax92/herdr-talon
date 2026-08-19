@@ -1,5 +1,6 @@
 use anyhow::Result;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     document::{SelectionKind, SourcePosition, WrappedDocument},
@@ -57,7 +58,7 @@ pub struct PickerState {
     alphabet: Vec<char>,
     mode: Mode,
     cursor: SourcePosition,
-    desired_column: u16,
+    desired_column: usize,
     top: usize,
     viewport_height: usize,
     initialized: bool,
@@ -74,7 +75,7 @@ impl PickerState {
     pub fn new(snapshot: &RunSnapshot) -> Result<Self> {
         generate_hints(&snapshot.alphabet, 1)?;
         let document = WrappedDocument::new(&snapshot.text, &snapshot.ansi, 1);
-        let cursor = document.last_position();
+        let cursor = document.last_line_start();
         Ok(Self {
             document,
             targets: snapshot.targets.clone(),
@@ -96,21 +97,34 @@ impl PickerState {
     }
 
     pub fn set_viewport(&mut self, width: u16, height: u16) {
-        self.document.reflow(width.max(1));
-        self.viewport_height = usize::from(height.max(1));
+        let width = width.max(1);
+        let height = usize::from(height.max(1));
+        let width_changed = self.document.width() != width;
+        let height_changed = self.viewport_height != height;
+        let previous_top = self.top;
+        let was_initialized = self.initialized;
+        self.document.reflow(width);
+        self.viewport_height = height;
         if self.initialized {
+            if width_changed {
+                self.cursor = self.document.clamp_position(self.cursor);
+                self.desired_column = self.document.visual_column_for(self.cursor);
+            }
             self.ensure_cursor_visible();
         } else {
-            self.cursor = self.document.last_position();
+            self.cursor = self.document.last_line_start();
             self.top = self
                 .document
                 .visual_rows()
                 .len()
                 .saturating_sub(self.viewport_height);
+            self.desired_column = self.document.visual_column_for(self.cursor);
             self.initialized = true;
         }
-        self.desired_column = self.document.visual_column_for(self.cursor);
-        self.refresh_hints();
+        if !was_initialized || width_changed || height_changed || self.top != previous_top {
+            self.hint_input.clear();
+            self.refresh_hints();
+        }
     }
 
     pub fn handle_event(&mut self, event: Event) -> InputOutcome {
@@ -196,9 +210,14 @@ impl PickerState {
         }
         if matches!(self.mode, Mode::Browse) {
             if let KeyCode::Char(character) = key.code {
-                let character = character.to_ascii_lowercase();
-                if self.alphabet.contains(&character) {
-                    return self.handle_hint(character);
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+                {
+                    let character = character.to_ascii_lowercase();
+                    if self.alphabet.contains(&character) {
+                        return self.handle_hint(character);
+                    }
                 }
             }
         }
@@ -244,18 +263,8 @@ impl PickerState {
         &self.visible_hints
     }
 
-    pub fn hint_for_target(&self, target_index: usize) -> Option<&str> {
-        self.visible_hints
-            .iter()
-            .find(|hint| hint.target_index == target_index)
-            .map(|hint| hint.label.as_str())
-    }
-
-    pub fn hint_is_active(&self, target_index: usize) -> bool {
-        self.hint_input.is_empty()
-            || self
-                .hint_for_target(target_index)
-                .is_some_and(|hint| hint.starts_with(&self.hint_input))
+    pub fn hint_is_active(&self, label: &str) -> bool {
+        self.hint_input.is_empty() || label.starts_with(&self.hint_input)
     }
 
     pub fn hint_input(&self) -> &str {
@@ -323,7 +332,7 @@ impl PickerState {
             KeyCode::Char('G') | KeyCode::Char('g')
                 if key.modifiers.contains(KeyModifiers::SHIFT) =>
             {
-                self.move_to(self.document.last_position())
+                self.move_to(self.document.last_line_start())
             }
             _ => return false,
         }
@@ -370,13 +379,16 @@ impl PickerState {
         let last = self.document.visual_rows().len().saturating_sub(1);
         let target = current.saturating_add_signed(delta).min(last);
         self.cursor = self.document.position_at(target, self.desired_column);
+        let previous_top = self.top;
         self.top = self
             .top
             .saturating_add_signed(delta)
             .min(self.document.visual_rows().len().saturating_sub(distance));
         self.hint_input.clear();
         self.error = None;
-        self.refresh_hints();
+        if self.top != previous_top {
+            self.refresh_hints();
+        }
     }
 
     fn move_left(&mut self) {
@@ -414,8 +426,11 @@ impl PickerState {
         }
         self.hint_input.clear();
         self.error = None;
+        let previous_top = self.top;
         self.ensure_cursor_visible();
-        self.refresh_hints();
+        if self.top != previous_top {
+            self.refresh_hints();
+        }
     }
 
     fn ensure_cursor_visible(&mut self) {
@@ -515,8 +530,11 @@ impl PickerState {
                 .unwrap_or(&self.search_matches[0]);
             self.cursor = next.start;
             self.desired_column = self.document.visual_column_for(self.cursor);
+            let previous_top = self.top;
             self.ensure_cursor_visible();
-            self.refresh_hints();
+            if self.top != previous_top {
+                self.refresh_hints();
+            }
         }
     }
 
@@ -570,6 +588,7 @@ impl PickerState {
             .find(|hint| hint.label == self.hint_input)
         {
             let text = self.targets[hint.target_index].text.clone();
+            self.hint_input.clear();
             return InputOutcome::Complete(Completion { text });
         }
         if self
@@ -619,11 +638,19 @@ fn find_search_matches(lines: &[String], query: &str) -> Vec<SearchMatch> {
         .iter()
         .enumerate()
         .flat_map(|(row, line)| {
+            let boundaries = line
+                .grapheme_indices(true)
+                .map(|(byte, _)| byte)
+                .collect::<Vec<_>>();
             line.match_indices(query).map(move |(byte, matched)| {
-                let start = line[..byte].chars().count();
-                let end = start
-                    .saturating_add(matched.chars().count())
+                let start = boundaries
+                    .partition_point(|boundary| *boundary <= byte)
                     .saturating_sub(1);
+                let end_byte = byte.saturating_add(matched.len());
+                let end = boundaries
+                    .partition_point(|boundary| *boundary < end_byte)
+                    .saturating_sub(1)
+                    .max(start);
                 SearchMatch {
                     start: SourcePosition::new(row, start),
                     end: SourcePosition::new(row, end),
@@ -675,6 +702,7 @@ mod tests {
 
         assert_eq!(state.top(), 7);
         assert_eq!(state.cursor().row, 9);
+        assert_eq!(state.cursor().column, 0);
 
         state.handle_key(key(KeyCode::Char('k')));
         assert_eq!(state.cursor().row, 8);
@@ -707,6 +735,7 @@ mod tests {
                 text: "TKT-2000".into()
             })
         );
+        assert!(state.hint_input().is_empty());
 
         let mut state = PickerState::new(&snapshot("TKT-1000\nplain\nTKT-2000\nTKT-3000")).unwrap();
         state.set_viewport(20, 2);
@@ -766,6 +795,67 @@ mod tests {
     }
 
     #[test]
+    fn repeated_draws_preserve_the_sticky_visual_column() {
+        let mut state = PickerState::new(&snapshot("abcdef\nx\nabcdef")).unwrap();
+        state.set_viewport(20, 3);
+        state.handle_key(key(KeyCode::Char('g')));
+        for _ in 0..5 {
+            state.handle_key(key(KeyCode::Char('l')));
+        }
+
+        state.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(state.cursor(), SourcePosition::new(1, 0));
+        state.set_viewport(20, 3);
+        state.handle_key(key(KeyCode::Char('j')));
+
+        assert_eq!(state.cursor(), SourcePosition::new(2, 5));
+    }
+
+    #[test]
+    fn resize_clears_a_partial_viewport_hint() {
+        let mut run = snapshot("TKT-1000 TKT-2000 TKT-3000 TKT-4000 TKT-5000");
+        run.alphabet = vec!['a', 's'];
+        let mut state = PickerState::new(&run).unwrap();
+        state.set_viewport(80, 2);
+        let prefix = state
+            .visible_hints()
+            .iter()
+            .find(|hint| hint.label.len() > 1)
+            .unwrap()
+            .label
+            .chars()
+            .next()
+            .unwrap();
+
+        assert_eq!(
+            state.handle_key(key(KeyCode::Char(prefix))),
+            InputOutcome::Continue
+        );
+        assert!(!state.hint_input().is_empty());
+        state.set_viewport(40, 2);
+
+        assert!(state.hint_input().is_empty());
+    }
+
+    #[test]
+    fn modified_hint_keys_do_not_copy_or_change_the_prefix() {
+        for modifiers in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::SUPER,
+        ] {
+            let mut state = PickerState::new(&snapshot("TKT-1000")).unwrap();
+            state.set_viewport(20, 2);
+
+            assert_eq!(
+                state.handle_key(modified('a', modifiers)),
+                InputOutcome::Continue
+            );
+            assert!(state.hint_input().is_empty());
+        }
+    }
+
+    #[test]
     fn incremental_search_and_repeat_wrap_in_both_directions() {
         let mut state =
             PickerState::new(&snapshot("alpha\nneedle one\nmiddle\nneedle two")).unwrap();
@@ -783,6 +873,19 @@ mod tests {
         assert_eq!(state.cursor().row, 1);
         state.handle_key(modified('N', KeyModifiers::SHIFT));
         assert_eq!(state.cursor().row, 3);
+    }
+
+    #[test]
+    fn search_positions_use_grapheme_columns() {
+        let family = "👨‍👩‍👧‍👦";
+        let mut state = PickerState::new(&snapshot(&format!("{family} /tmp/a"))).unwrap();
+        state.set_viewport(20, 2);
+        state.handle_key(key(KeyCode::Char('/')));
+        for character in "/tmp".chars() {
+            state.handle_key(key(KeyCode::Char(character)));
+        }
+
+        assert_eq!(state.cursor(), SourcePosition::new(0, 2));
     }
 
     #[test]

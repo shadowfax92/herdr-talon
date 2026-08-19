@@ -596,6 +596,7 @@ dependencies = [
  "tempfile",
  "toml",
  "toml_edit",
+ "unicode-segmentation",
  "unicode-width",
  "uuid",
 ]

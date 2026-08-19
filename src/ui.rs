@@ -108,10 +108,13 @@ fn render_targets(buffer: &mut Buffer, area: Rect, state: &PickerState) {
     let style = Style::default()
         .fg(TARGET_COLOR)
         .add_modifier(Modifier::UNDERLINED);
-    for (target_index, target) in state.targets().iter().enumerate() {
-        if state.hint_for_target(target_index).is_none() || !state.hint_is_active(target_index) {
+    for hint in state.visible_hints() {
+        if !state.hint_is_active(&hint.label) {
             continue;
         }
+        let Some(target) = state.targets().get(hint.target_index) else {
+            continue;
+        };
         for occurrence in &target.occurrences {
             for segment in state.document().occurrence_segments(occurrence) {
                 paint_segment(buffer, area, state.top(), segment, style);
@@ -157,7 +160,7 @@ fn render_cursor(buffer: &mut Buffer, area: Rect, state: &PickerState) {
     }
     let column = state.document().visual_column_for(state.cursor());
     let position = Position::new(
-        area.x.saturating_add(column),
+        area.x.saturating_add(saturating_u16(column)),
         area.y
             .saturating_add(saturating_u16(visual_row.saturating_sub(state.top()))),
     );
@@ -168,7 +171,7 @@ fn render_cursor(buffer: &mut Buffer, area: Rect, state: &PickerState) {
 
 fn render_hints(buffer: &mut Buffer, area: Rect, state: &PickerState) {
     for hint in state.visible_hints() {
-        if !state.hint_is_active(hint.target_index) {
+        if !state.hint_is_active(&hint.label) {
             continue;
         }
         let Some(target) = state.targets().get(hint.target_index) else {
@@ -183,7 +186,12 @@ fn render_hints(buffer: &mut Buffer, area: Rect, state: &PickerState) {
             {
                 continue;
             }
-            let x = area.x.saturating_add(anchor.column);
+            let badge_column = hint_badge_column(
+                anchor.column,
+                hint.label.chars().count(),
+                usize::from(area.width),
+            );
+            let x = area.x.saturating_add(saturating_u16(badge_column));
             let y = area
                 .y
                 .saturating_add(saturating_u16(anchor.row.saturating_sub(state.top())));
@@ -219,8 +227,8 @@ fn paint_segment(
     let y = area
         .y
         .saturating_add(saturating_u16(segment.row.saturating_sub(top)));
-    for column in segment.start..segment.end.min(area.width) {
-        let position = Position::new(area.x.saturating_add(column), y);
+    for column in segment.start..segment.end.min(usize::from(area.width)) {
+        let position = Position::new(area.x.saturating_add(saturating_u16(column)), y);
         if area.contains(position) {
             buffer[position].set_style(style);
         }
@@ -333,7 +341,7 @@ fn render_footer(buffer: &mut Buffer, area: Rect, snapshot: &RunSnapshot, state:
         )
     } else {
         (
-            " g/G top/bottom · Ctrl-u/d half page · n/N previous/next search match ".into(),
+            " g/G top/bottom · Ctrl-u/d half page · n/N next/previous search match ".into(),
             Style::default().fg(Color::DarkGray),
         )
     };
@@ -352,6 +360,10 @@ fn render_footer_line(buffer: &mut Buffer, area: Rect, offset: u16, line: Line<'
 
 fn saturating_u16(value: usize) -> u16 {
     u16::try_from(value).unwrap_or(u16::MAX)
+}
+
+fn hint_badge_column(anchor: usize, label_width: usize, viewport_width: usize) -> usize {
+    anchor.min(viewport_width.saturating_sub(label_width))
 }
 
 #[cfg(test)]
@@ -403,6 +415,7 @@ mod tests {
         let text = buffer_text(&buffer);
         assert!(text.contains("Talon · focused pane history"));
         assert!(text.contains("type hint → copy & close"));
+        assert!(text.contains("n/N next/previous"));
         assert!(text.contains("last 1,000 lines"));
         assert!(buffer.content.iter().any(|cell| cell.fg == Color::Red));
         assert!(buffer
@@ -437,5 +450,11 @@ mod tests {
 
         assert!(buffer_text(&buffer).contains("/needle█"));
         assert!(buffer.content.iter().any(|cell| cell.fg == Color::Magenta));
+    }
+
+    #[test]
+    fn multi_key_hints_shift_left_at_the_right_edge() {
+        assert_eq!(hint_badge_column(9, 2, 10), 8);
+        assert_eq!(hint_badge_column(4, 2, 10), 4);
     }
 }

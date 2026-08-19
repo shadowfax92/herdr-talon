@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_ALPHABET: &str = "asdfwerzxcuioptbm";
+const LEGACY_DEFAULT_ALPHABET: &str = "asdfwerzxvjkluopghtyb";
 const RESERVED_HINT_KEYS: &str = "ghjklnqvy";
 
 const BUILTIN_PATTERNS: &[(&str, &str)] = &[
@@ -115,11 +116,16 @@ impl Config {
         let file: FileConfig = toml::from_str(&source)
             .with_context(|| format!("failed to parse {}", path.display()))?;
         let defaults = Self::default();
-        let alphabet = file
+        let configured_alphabet = file
             .alphabet
-            .unwrap_or_else(|| defaults.alphabet.iter().collect())
-            .chars()
-            .collect::<Vec<_>>();
+            .unwrap_or_else(|| defaults.alphabet.iter().collect());
+        let alphabet = if configured_alphabet == LEGACY_DEFAULT_ALPHABET {
+            DEFAULT_ALPHABET
+        } else {
+            &configured_alphabet
+        }
+        .chars()
+        .collect::<Vec<_>>();
         validate_alphabet(&alphabet)?;
 
         let enabled = file.enabled_builtin_patterns.unwrap_or_else(|| {
@@ -378,5 +384,19 @@ regex = "("
 
         assert!(error.contains("reserved"));
         assert!(error.contains('j'));
+    }
+
+    #[test]
+    fn legacy_default_alphabet_migrates_to_the_safe_default() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "alphabet = \"asdfwerzxvjkluopghtyb\"\n").unwrap();
+
+        let config = Config::load(&path).unwrap();
+
+        assert_eq!(
+            config.alphabet,
+            DEFAULT_ALPHABET.chars().collect::<Vec<_>>()
+        );
     }
 }

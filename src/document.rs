@@ -5,7 +5,8 @@ use ratatui::{
     style::Style,
     text::{Line, Span},
 };
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::matcher::Occurrence;
 
@@ -30,11 +31,11 @@ pub enum SelectionKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VisualPoint {
     pub row: usize,
-    pub column: u16,
+    pub column: usize,
 }
 
 impl VisualPoint {
-    pub const fn new(row: usize, column: u16) -> Self {
+    pub const fn new(row: usize, column: usize) -> Self {
         Self { row, column }
     }
 }
@@ -42,12 +43,12 @@ impl VisualPoint {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VisualSegment {
     pub row: usize,
-    pub start: u16,
-    pub end: u16,
+    pub start: usize,
+    pub end: usize,
 }
 
 impl VisualSegment {
-    pub const fn new(row: usize, start: u16, end: u16) -> Self {
+    pub const fn new(row: usize, start: usize, end: usize) -> Self {
         Self { row, start, end }
     }
 }
@@ -55,8 +56,8 @@ impl VisualSegment {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VisualRow {
     source_row: usize,
-    start_char: usize,
-    end_char: usize,
+    start_column: usize,
+    end_column: usize,
     start_cell: usize,
     end_cell: usize,
     line: Line<'static>,
@@ -67,8 +68,8 @@ impl VisualRow {
         self.source_row
     }
 
-    pub fn source_chars(&self) -> Range<usize> {
-        self.start_char..self.end_char
+    pub fn source_columns(&self) -> Range<usize> {
+        self.start_column..self.end_column
     }
 
     pub fn source_cells(&self) -> Range<usize> {
@@ -91,20 +92,30 @@ impl VisualRow {
 #[derive(Clone, Debug)]
 pub struct WrappedDocument {
     lines: Vec<String>,
+    terminated: Vec<bool>,
     styled_lines: Vec<Line<'static>>,
+    cell_offsets: Vec<Vec<usize>>,
     width: u16,
     visual_rows: Vec<VisualRow>,
+    visual_ranges: Vec<Range<usize>>,
 }
 
 impl WrappedDocument {
     pub fn new(text: &str, ansi: &str, width: u16) -> Self {
-        let lines = logical_lines(text);
+        let (lines, terminated) = logical_lines(text);
         let styled_lines = aligned_styled_lines(&lines, ansi);
+        let cell_offsets = lines
+            .iter()
+            .map(|line| grapheme_cell_offsets(line))
+            .collect();
         let mut document = Self {
             lines,
+            terminated,
             styled_lines,
+            cell_offsets,
             width: width.max(1),
             visual_rows: Vec::new(),
+            visual_ranges: Vec::new(),
         };
         document.rebuild();
         document
@@ -132,9 +143,9 @@ impl WrappedDocument {
     }
 
     pub fn line_len(&self, row: usize) -> usize {
-        self.lines
+        self.cell_offsets
             .get(row)
-            .map(|line| line.chars().count())
+            .map(|offsets| offsets.len().saturating_sub(1))
             .unwrap_or(0)
     }
 
@@ -142,9 +153,8 @@ impl WrappedDocument {
         SourcePosition::new(0, 0)
     }
 
-    pub fn last_position(&self) -> SourcePosition {
-        let row = self.lines.len().saturating_sub(1);
-        SourcePosition::new(row, self.line_len(row).saturating_sub(1))
+    pub fn last_line_start(&self) -> SourcePosition {
+        SourcePosition::new(self.lines.len().saturating_sub(1), 0)
     }
 
     pub fn clamp_position(&self, position: SourcePosition) -> SourcePosition {
@@ -157,40 +167,40 @@ impl WrappedDocument {
 
     pub fn visual_row_for(&self, position: SourcePosition) -> usize {
         let position = self.clamp_position(position);
-        let mut last = 0;
-        for (index, row) in self.visual_rows.iter().enumerate() {
-            if row.source_row != position.row {
-                continue;
-            }
+        let Some(range) = self.visual_ranges.get(position.row) else {
+            return 0;
+        };
+        let mut last = range.start;
+        for index in range.clone() {
+            let row = &self.visual_rows[index];
             last = index;
-            if row.start_char == row.end_char || position.column < row.end_char {
+            if row.start_column == row.end_column || position.column < row.end_column {
                 return index;
             }
         }
         last
     }
 
-    pub fn visual_column_for(&self, position: SourcePosition) -> u16 {
+    pub fn visual_column_for(&self, position: SourcePosition) -> usize {
         let position = self.clamp_position(position);
         let visual_row = &self.visual_rows[self.visual_row_for(position)];
-        let cell = cell_at_char(&self.lines[position.row], position.column);
-        saturating_u16(cell.saturating_sub(visual_row.start_cell))
+        self.cell_offsets[position.row][position.column].saturating_sub(visual_row.start_cell)
     }
 
-    pub fn position_at(&self, visual_row: usize, visual_column: u16) -> SourcePosition {
+    pub fn position_at(&self, visual_row: usize, visual_column: usize) -> SourcePosition {
         let row = &self.visual_rows[visual_row.min(self.visual_rows.len().saturating_sub(1))];
-        if row.start_char == row.end_char {
+        if row.start_column == row.end_column {
             return SourcePosition::new(row.source_row, 0);
         }
-        let target_cell = row.start_cell.saturating_add(usize::from(visual_column));
-        let line = &self.lines[row.source_row];
-        for column in row.start_char..row.end_char {
-            let end = cell_at_char(line, column.saturating_add(1));
+        let target_cell = row.start_cell.saturating_add(visual_column);
+        let offsets = &self.cell_offsets[row.source_row];
+        for column in row.start_column..row.end_column {
+            let end = offsets[column.saturating_add(1)];
             if target_cell < end {
                 return SourcePosition::new(row.source_row, column);
             }
         }
-        SourcePosition::new(row.source_row, row.end_char.saturating_sub(1))
+        SourcePosition::new(row.source_row, row.end_column.saturating_sub(1))
     }
 
     pub fn selected_text(
@@ -200,24 +210,20 @@ impl WrappedDocument {
         kind: SelectionKind,
     ) -> String {
         let (start, end) = ordered(self.clamp_position(anchor), self.clamp_position(cursor));
-        let mut selected = Vec::with_capacity(end.row.saturating_sub(start.row).saturating_add(1));
+        let mut selected = String::new();
         for row in start.row..=end.row {
             let line = &self.lines[row];
-            let length = line.chars().count();
-            let (from, to) = match kind {
-                SelectionKind::Line => (0, length),
-                SelectionKind::Character if start.row == end.row => {
-                    (start.column, end.column.saturating_add(1).min(length))
-                }
-                SelectionKind::Character if row == start.row => (start.column, length),
-                SelectionKind::Character if row == end.row => {
-                    (0, end.column.saturating_add(1).min(length))
-                }
-                SelectionKind::Character => (0, length),
+            let range = selection_range(row, start, end, kind, self.line_len(row));
+            selected.push_str(grapheme_slice(line, range));
+            let include_terminator = match kind {
+                SelectionKind::Line => self.terminated[row],
+                SelectionKind::Character => row < end.row && self.terminated[row],
             };
-            selected.push(char_slice(line, from, to));
+            if include_terminator {
+                selected.push('\n');
+            }
         }
-        selected.join("\n")
+        selected
     }
 
     pub fn selection_segments(
@@ -228,60 +234,46 @@ impl WrappedDocument {
     ) -> Vec<VisualSegment> {
         let (start, end) = ordered(self.clamp_position(anchor), self.clamp_position(cursor));
         let mut segments = Vec::new();
-        for (visual_index, visual) in self.visual_rows.iter().enumerate() {
-            if visual.source_row < start.row || visual.source_row > end.row {
-                continue;
-            }
-            let line = &self.lines[visual.source_row];
-            let length = line.chars().count();
-            let (from, to) = match kind {
-                SelectionKind::Line => (0, length),
-                SelectionKind::Character if start.row == end.row => {
-                    (start.column, end.column.saturating_add(1).min(length))
+        for source_row in start.row..=end.row {
+            let selected = selection_range(source_row, start, end, kind, self.line_len(source_row));
+            let offsets = &self.cell_offsets[source_row];
+            for visual_index in self.visual_ranges[source_row].clone() {
+                let visual = &self.visual_rows[visual_index];
+                if selected.is_empty() {
+                    segments.push(VisualSegment::new(visual_index, 0, 1));
+                    continue;
                 }
-                SelectionKind::Character if visual.source_row == start.row => {
-                    (start.column, length)
+                let from_cell = offsets[selected.start].max(visual.start_cell);
+                let to_cell = offsets[selected.end].min(visual.end_cell);
+                if from_cell < to_cell {
+                    segments.push(VisualSegment::new(
+                        visual_index,
+                        from_cell.saturating_sub(visual.start_cell),
+                        to_cell.saturating_sub(visual.start_cell),
+                    ));
                 }
-                SelectionKind::Character if visual.source_row == end.row => {
-                    (0, end.column.saturating_add(1).min(length))
-                }
-                SelectionKind::Character => (0, length),
-            };
-            if length == 0 && from == 0 && to == 0 {
-                segments.push(VisualSegment::new(visual_index, 0, 1));
-                continue;
-            }
-            let from_cell = cell_at_char(line, from).max(visual.start_cell);
-            let to_cell = cell_at_char(line, to).min(visual.end_cell);
-            if from_cell < to_cell {
-                segments.push(VisualSegment::new(
-                    visual_index,
-                    saturating_u16(from_cell.saturating_sub(visual.start_cell)),
-                    saturating_u16(to_cell.saturating_sub(visual.start_cell)),
-                ));
             }
         }
         segments
     }
 
     pub fn occurrence_segments(&self, occurrence: &Occurrence) -> Vec<VisualSegment> {
-        let source_row = usize::from(occurrence.row);
-        let from = usize::from(occurrence.highlight_col);
-        let to = from.saturating_add(usize::from(occurrence.highlight_width));
-        self.visual_rows
-            .iter()
-            .enumerate()
-            .filter_map(|(index, visual)| {
-                if visual.source_row != source_row {
-                    return None;
-                }
+        let Some(range) = self.visual_ranges.get(occurrence.row) else {
+            return Vec::new();
+        };
+        let from = occurrence.highlight_col;
+        let to = from.saturating_add(occurrence.highlight_width);
+        range
+            .clone()
+            .filter_map(|index| {
+                let visual = &self.visual_rows[index];
                 let start = from.max(visual.start_cell);
                 let end = to.min(visual.end_cell);
                 (start < end).then(|| {
                     VisualSegment::new(
                         index,
-                        saturating_u16(start.saturating_sub(visual.start_cell)),
-                        saturating_u16(end.saturating_sub(visual.start_cell)),
+                        start.saturating_sub(visual.start_cell),
+                        end.saturating_sub(visual.start_cell),
                     )
                 })
             })
@@ -289,36 +281,38 @@ impl WrappedDocument {
     }
 
     pub fn hint_anchor(&self, occurrence: &Occurrence) -> Option<VisualPoint> {
-        let source_row = usize::from(occurrence.row);
-        let cell = usize::from(occurrence.hint_col);
-        self.visual_rows
-            .iter()
-            .enumerate()
-            .find(|(_, visual)| {
-                visual.source_row == source_row
-                    && cell >= visual.start_cell
-                    && cell < visual.end_cell
+        let range = self.visual_ranges.get(occurrence.row)?;
+        let cell = occurrence.hint_col;
+        range
+            .clone()
+            .find(|index| {
+                let visual = &self.visual_rows[*index];
+                cell >= visual.start_cell && cell < visual.end_cell
             })
-            .map(|(row, visual)| {
-                VisualPoint::new(row, saturating_u16(cell.saturating_sub(visual.start_cell)))
+            .map(|row| {
+                let visual = &self.visual_rows[row];
+                VisualPoint::new(row, cell.saturating_sub(visual.start_cell))
             })
     }
 
     fn rebuild(&mut self) {
         self.visual_rows.clear();
+        self.visual_ranges.clear();
         for (source_row, (line, styled)) in
             self.lines.iter().zip(self.styled_lines.iter()).enumerate()
         {
+            let start = self.visual_rows.len();
             self.visual_rows
                 .extend(wrap_line(source_row, line, styled, self.width));
+            self.visual_ranges.push(start..self.visual_rows.len());
         }
     }
 }
 
-#[derive(Clone, Copy)]
-struct StyledCharacter {
-    character: char,
-    style: Style,
+#[derive(Clone)]
+struct StyledGrapheme {
+    spans: Vec<Span<'static>>,
+    width: usize,
 }
 
 fn aligned_styled_lines(lines: &[String], ansi: &str) -> Vec<Line<'static>> {
@@ -338,41 +332,40 @@ fn aligned_styled_lines(lines: &[String], ansi: &str) -> Vec<Line<'static>> {
 }
 
 fn wrap_line(source_row: usize, plain: &str, styled: &Line<'static>, width: u16) -> Vec<VisualRow> {
-    let characters = styled_characters(styled);
+    let graphemes = styled_graphemes(plain, styled);
     let mut rows = Vec::new();
     let mut spans = Vec::<Span<'static>>::new();
-    let mut start_char = 0;
+    let mut start_column = 0;
     let mut start_cell = 0usize;
     let mut cell = 0usize;
 
-    for (column, styled_char) in characters.iter().enumerate() {
-        let character_width = UnicodeWidthChar::width(styled_char.character).unwrap_or(0);
+    for (column, grapheme) in graphemes.iter().enumerate() {
         if cell > start_cell
             && cell
                 .saturating_sub(start_cell)
-                .saturating_add(character_width)
+                .saturating_add(grapheme.width)
                 > usize::from(width)
         {
             rows.push(visual_row(
                 source_row,
-                start_char,
+                start_column,
                 column,
                 start_cell,
                 cell,
                 std::mem::take(&mut spans),
                 styled,
             ));
-            start_char = column;
+            start_column = column;
             start_cell = cell;
         }
-        push_character(&mut spans, *styled_char);
-        cell = cell.saturating_add(character_width);
+        push_grapheme(&mut spans, grapheme);
+        cell = cell.saturating_add(grapheme.width);
     }
 
     rows.push(visual_row(
         source_row,
-        start_char,
-        characters.len(),
+        start_column,
+        graphemes.len(),
         start_cell,
         cell,
         spans,
@@ -390,8 +383,8 @@ fn wrap_line(source_row: usize, plain: &str, styled: &Line<'static>, width: u16)
 
 fn visual_row(
     source_row: usize,
-    start_char: usize,
-    end_char: usize,
+    start_column: usize,
+    end_column: usize,
     start_cell: usize,
     end_cell: usize,
     spans: Vec<Span<'static>>,
@@ -399,8 +392,8 @@ fn visual_row(
 ) -> VisualRow {
     VisualRow {
         source_row,
-        start_char,
-        end_char,
+        start_column,
+        end_column,
         start_cell,
         end_cell,
         line: Line {
@@ -411,35 +404,68 @@ fn visual_row(
     }
 }
 
-fn styled_characters(line: &Line<'static>) -> Vec<StyledCharacter> {
-    line.spans
+fn styled_graphemes(plain: &str, line: &Line<'static>) -> Vec<StyledGrapheme> {
+    let mut characters = line
+        .spans
         .iter()
         .flat_map(|span| {
-            span.content.chars().map(|character| StyledCharacter {
-                character,
-                style: span.style,
-            })
+            span.content
+                .chars()
+                .map(|character| (character, span.style))
+        })
+        .collect::<Vec<_>>()
+        .into_iter();
+    plain
+        .graphemes(true)
+        .map(|grapheme| {
+            let mut spans = Vec::new();
+            for _ in grapheme.chars() {
+                let (character, style) = characters.next().expect("aligned styled line");
+                push_styled_character(&mut spans, character, style);
+            }
+            StyledGrapheme {
+                spans,
+                width: UnicodeWidthStr::width(grapheme),
+            }
         })
         .collect()
 }
 
-fn push_character(spans: &mut Vec<Span<'static>>, styled: StyledCharacter) {
-    if let Some(last) = spans.last_mut().filter(|span| span.style == styled.style) {
-        last.content.to_mut().push(styled.character);
-    } else {
-        spans.push(Span::styled(styled.character.to_string(), styled.style));
+fn push_grapheme(spans: &mut Vec<Span<'static>>, grapheme: &StyledGrapheme) {
+    for span in &grapheme.spans {
+        if let Some(last) = spans.last_mut().filter(|last| last.style == span.style) {
+            last.content.to_mut().push_str(span.content.as_ref());
+        } else {
+            spans.push(span.clone());
+        }
     }
 }
 
-fn logical_lines(text: &str) -> Vec<String> {
-    let mut lines = text.split('\n').map(str::to_owned).collect::<Vec<_>>();
-    if text.ends_with('\n') && lines.last().is_some_and(String::is_empty) {
-        lines.pop();
+fn push_styled_character(spans: &mut Vec<Span<'static>>, character: char, style: Style) {
+    if let Some(last) = spans.last_mut().filter(|span| span.style == style) {
+        last.content.to_mut().push(character);
+    } else {
+        spans.push(Span::styled(character.to_string(), style));
+    }
+}
+
+fn logical_lines(text: &str) -> (Vec<String>, Vec<bool>) {
+    let mut lines = Vec::new();
+    let mut terminated = Vec::new();
+    for chunk in text.split_inclusive('\n') {
+        if let Some(line) = chunk.strip_suffix('\n') {
+            lines.push(line.to_owned());
+            terminated.push(true);
+        } else {
+            lines.push(chunk.to_owned());
+            terminated.push(false);
+        }
     }
     if lines.is_empty() {
         lines.push(String::new());
+        terminated.push(false);
     }
-    lines
+    (lines, terminated)
 }
 
 fn line_content(line: &Line<'_>) -> String {
@@ -449,18 +475,42 @@ fn line_content(line: &Line<'_>) -> String {
         .collect()
 }
 
-fn cell_at_char(line: &str, column: usize) -> usize {
-    line.chars()
-        .take(column)
-        .map(|character| UnicodeWidthChar::width(character).unwrap_or(0))
-        .sum()
+fn grapheme_cell_offsets(line: &str) -> Vec<usize> {
+    let mut offsets = Vec::with_capacity(line.len().saturating_add(1));
+    let mut cell = 0usize;
+    offsets.push(cell);
+    for grapheme in line.graphemes(true) {
+        cell = cell.saturating_add(UnicodeWidthStr::width(grapheme));
+        offsets.push(cell);
+    }
+    offsets
 }
 
-fn char_slice(line: &str, from: usize, to: usize) -> String {
-    line.chars()
-        .skip(from)
-        .take(to.saturating_sub(from))
-        .collect()
+fn grapheme_slice(line: &str, range: Range<usize>) -> &str {
+    let mut boundaries = line
+        .grapheme_indices(true)
+        .map(|(byte, _)| byte)
+        .collect::<Vec<_>>();
+    boundaries.push(line.len());
+    &line[boundaries[range.start]..boundaries[range.end]]
+}
+
+fn selection_range(
+    row: usize,
+    start: SourcePosition,
+    end: SourcePosition,
+    kind: SelectionKind,
+    length: usize,
+) -> Range<usize> {
+    match kind {
+        SelectionKind::Line => 0..length,
+        SelectionKind::Character if start.row == end.row => {
+            start.column..end.column.saturating_add(1).min(length)
+        }
+        SelectionKind::Character if row == start.row => start.column..length,
+        SelectionKind::Character if row == end.row => 0..end.column.saturating_add(1).min(length),
+        SelectionKind::Character => 0..length,
+    }
 }
 
 fn ordered(first: SourcePosition, second: SourcePosition) -> (SourcePosition, SourcePosition) {
@@ -469,10 +519,6 @@ fn ordered(first: SourcePosition, second: SourcePosition) -> (SourcePosition, So
     } else {
         (second, first)
     }
-}
-
-fn saturating_u16(value: usize) -> u16 {
-    u16::try_from(value).unwrap_or(u16::MAX)
 }
 
 #[cfg(test)]
@@ -495,8 +541,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["ab", "界c", "", "xyz"]
         );
-        assert_eq!(document.visual_rows()[0].source_chars(), 0..2);
-        assert_eq!(document.visual_rows()[1].source_chars(), 2..4);
+        assert_eq!(document.visual_rows()[0].source_columns(), 0..2);
+        assert_eq!(document.visual_rows()[1].source_columns(), 2..4);
         assert_eq!(document.visual_rows()[1].source_cells(), 2..5);
         assert_eq!(document.visual_rows()[2].source_row(), 1);
     }
@@ -559,6 +605,60 @@ mod tests {
             ),
             "abcdef\nsecond"
         );
+    }
+
+    #[test]
+    fn linewise_selections_preserve_real_line_terminators() {
+        let document = WrappedDocument::new("first\n\nlast", "first\n\nlast", 20);
+
+        assert_eq!(
+            document.selected_text(
+                SourcePosition::new(0, 0),
+                SourcePosition::new(0, 0),
+                SelectionKind::Line,
+            ),
+            "first\n"
+        );
+        assert_eq!(
+            document.selected_text(
+                SourcePosition::new(1, 0),
+                SourcePosition::new(1, 0),
+                SelectionKind::Line,
+            ),
+            "\n"
+        );
+        assert_eq!(
+            document.selected_text(
+                SourcePosition::new(2, 0),
+                SourcePosition::new(2, 0),
+                SelectionKind::Line,
+            ),
+            "last"
+        );
+    }
+
+    #[test]
+    fn grapheme_clusters_are_atomic_for_wrapping_and_coordinates() {
+        let family = "👨‍👩‍👧‍👦";
+        let text = format!("{family} /tmp/a");
+        let document = WrappedDocument::new(&text, &text, 3);
+        let occurrence = Occurrence {
+            row: 0,
+            highlight_col: 3,
+            highlight_width: 6,
+            hint_col: 3,
+            hint_width: 6,
+        };
+
+        assert_eq!(document.line_len(0), 8);
+        assert_eq!(document.visual_rows()[0].content(), format!("{family} "));
+        assert_eq!(document.visual_rows()[0].source_columns(), 0..2);
+        assert_eq!(
+            document.hint_anchor(&occurrence),
+            Some(VisualPoint::new(1, 0))
+        );
+        assert_eq!(document.position_at(0, 1), SourcePosition::new(0, 0));
+        assert_eq!(document.position_at(1, 0), SourcePosition::new(0, 2));
     }
 
     #[test]
