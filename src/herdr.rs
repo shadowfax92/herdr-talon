@@ -6,6 +6,7 @@ use std::process::{Command, Output};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::config::PopupSize;
 use crate::PLUGIN_ID;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -93,6 +94,11 @@ impl Herdr {
         Ok(response.result.layout)
     }
 
+    pub fn client_width(&self, pane_id: &str) -> Result<u16> {
+        let layout = self.layout(pane_id)?;
+        Ok(layout.area.x.saturating_add(layout.area.width))
+    }
+
     pub fn pane_info(&self, pane_id: &str) -> Result<PaneInfo> {
         let response: PaneEnvelope = self.json(["pane", "get", pane_id])?;
         let viewport_rows = response
@@ -109,20 +115,39 @@ impl Herdr {
     }
 
     pub fn read_visible(&self, pane_id: &str, ansi: bool) -> Result<String> {
+        self.read_pane(pane_id, "visible", ansi, None)
+    }
+
+    pub fn read_recent_unwrapped(&self, pane_id: &str, ansi: bool, lines: u32) -> Result<String> {
+        self.read_pane(pane_id, "recent-unwrapped", ansi, Some(lines))
+    }
+
+    fn read_pane(
+        &self,
+        pane_id: &str,
+        source: &str,
+        ansi: bool,
+        lines: Option<u32>,
+    ) -> Result<String> {
         let format = if ansi { "ansi" } else { "text" };
-        let output = self.output([
-            OsStr::new("pane"),
-            OsStr::new("read"),
-            OsStr::new(pane_id),
-            OsStr::new("--source"),
-            OsStr::new("visible"),
-            OsStr::new("--format"),
-            OsStr::new(format),
-        ])?;
+        let mut args = vec![
+            OsString::from("pane"),
+            OsString::from("read"),
+            OsString::from(pane_id),
+            OsString::from("--source"),
+            OsString::from(source),
+        ];
+        if let Some(lines) = lines {
+            args.push(OsString::from("--lines"));
+            args.push(OsString::from(lines.to_string()));
+        }
+        args.push(OsString::from("--format"));
+        args.push(OsString::from(format));
+        let output = self.output(args)?;
         String::from_utf8(output).context("Herdr pane read returned non-UTF-8 output")
     }
 
-    pub fn open_picker(&self, run_id: &str) -> Result<String> {
+    pub fn open_picker(&self, run_id: &str, popup: &PopupSize) -> Result<String> {
         let environment = format!("HERDR_TALON_RUN_ID={run_id}");
         let response: PluginPaneOpenEnvelope = self.json([
             OsStr::new("plugin"),
@@ -133,9 +158,14 @@ impl Herdr {
             OsStr::new("--entrypoint"),
             OsStr::new("picker"),
             OsStr::new("--placement"),
-            OsStr::new("overlay"),
+            OsStr::new("popup"),
+            OsStr::new("--width"),
+            OsStr::new(&popup.width),
+            OsStr::new("--height"),
+            OsStr::new(&popup.height),
             OsStr::new("--env"),
             OsStr::new(&environment),
+            OsStr::new("--focus"),
         ])?;
         let pane_id = response.result.plugin_pane.pane.pane_id;
         if pane_id.is_empty() || pane_id.chars().any(char::is_control) {

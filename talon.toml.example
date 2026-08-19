@@ -1,4 +1,4 @@
-alphabet = "asdfwerzxvjkluopghtyb"
+alphabet = "asdfwerzxcuioptbm"
 enabled_builtin_patterns = [
   "ip",
   "uuid",

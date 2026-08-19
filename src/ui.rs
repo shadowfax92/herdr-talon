@@ -222,6 +222,9 @@ mod tests {
                 text: "X deadbeef\n".into(),
                 ansi: "\u{1b}[31mX deadbeef\u{1b}[0m\n".into(),
             }],
+            text: "X deadbeef\n".into(),
+            ansi: "\u{1b}[31mX deadbeef\u{1b}[0m\n".into(),
+            history_limited: false,
             targets: vec![TabTarget {
                 text: "deadbeef".into(),
                 occurrences: vec![TargetOccurrence {
@@ -236,6 +239,7 @@ mod tests {
                 }],
             }],
             hints: vec!["a".into()],
+            alphabet: vec!['a', 's'],
         }
     }
 

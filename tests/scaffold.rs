@@ -34,5 +34,7 @@ fn manifest_declares_the_complete_plugin_contract() {
     assert_eq!(manifest["build"].as_array().unwrap().len(), 1);
     assert_eq!(manifest["actions"].as_array().unwrap().len(), 2);
     assert_eq!(manifest["panes"].as_array().unwrap().len(), 1);
-    assert_eq!(manifest["panes"][0]["placement"].as_str(), Some("overlay"));
+    assert_eq!(manifest["panes"][0]["placement"].as_str(), Some("popup"));
+    assert_eq!(manifest["panes"][0]["width"].as_str(), Some("90%"));
+    assert_eq!(manifest["panes"][0]["height"].as_str(), Some("90%"));
 }

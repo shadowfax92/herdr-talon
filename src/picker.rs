@@ -102,8 +102,12 @@ mod tests {
             source_cwd: None,
             layout: captured.clone(),
             panes: Vec::new(),
+            text: String::new(),
+            ansi: String::new(),
+            history_limited: false,
             targets: Vec::new(),
             hints: Vec::new(),
+            alphabet: vec!['a', 's'],
         };
         let mut current = captured;
 

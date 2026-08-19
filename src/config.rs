@@ -5,7 +5,8 @@ use std::collections::HashSet;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_ALPHABET: &str = "asdfwerzxvjkluopghtyb";
+const DEFAULT_ALPHABET: &str = "asdfwerzxcuioptbm";
+const RESERVED_HINT_KEYS: &str = "ghjklnqvy";
 
 const BUILTIN_PATTERNS: &[(&str, &str)] = &[
     ("ip", r"\d{1,3}(?:\.\d{1,3}){3}"),
@@ -46,6 +47,25 @@ pub struct PatternDefinition {
 pub struct Config {
     pub alphabet: Vec<char>,
     pub patterns: Vec<PatternDefinition>,
+    pub popup: PopupSize,
+    pub profiles: Vec<PopupProfile>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PopupSize {
+    pub width: String,
+    pub height: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PopupProfile {
+    pub name: String,
+    pub min_client_width: Option<u16>,
+    pub max_client_width: Option<u16>,
+    pub width: String,
+    pub height: String,
 }
 
 impl Default for Config {
@@ -53,6 +73,33 @@ impl Default for Config {
         Self {
             alphabet: DEFAULT_ALPHABET.chars().collect(),
             patterns: definitions(BUILTIN_PATTERNS).collect(),
+            popup: PopupSize {
+                width: "90%".into(),
+                height: "90%".into(),
+            },
+            profiles: vec![
+                PopupProfile {
+                    name: "laptop".into(),
+                    min_client_width: None,
+                    max_client_width: Some(310),
+                    width: "95%".into(),
+                    height: "90%".into(),
+                },
+                PopupProfile {
+                    name: "partial-ultrawide".into(),
+                    min_client_width: None,
+                    max_client_width: Some(350),
+                    width: "90%".into(),
+                    height: "90%".into(),
+                },
+                PopupProfile {
+                    name: "full-ultrawide".into(),
+                    min_client_width: Some(400),
+                    max_client_width: None,
+                    width: "70%".into(),
+                    height: "90%".into(),
+                },
+            ],
         }
     }
 }
@@ -67,9 +114,10 @@ impl Config {
             .with_context(|| format!("failed to read {}", path.display()))?;
         let file: FileConfig = toml::from_str(&source)
             .with_context(|| format!("failed to parse {}", path.display()))?;
+        let defaults = Self::default();
         let alphabet = file
             .alphabet
-            .unwrap_or_else(|| DEFAULT_ALPHABET.to_string())
+            .unwrap_or_else(|| defaults.alphabet.iter().collect())
             .chars()
             .collect::<Vec<_>>();
         validate_alphabet(&alphabet)?;
@@ -95,7 +143,28 @@ impl Config {
         }
         validate_patterns(&patterns)?;
 
-        Ok(Self { alphabet, patterns })
+        let popup = file.popup.unwrap_or(defaults.popup);
+        let profiles = file.profiles.unwrap_or(defaults.profiles);
+        validate_popup(&popup)?;
+        validate_profiles(&profiles)?;
+
+        Ok(Self {
+            alphabet,
+            patterns,
+            popup,
+            profiles,
+        })
+    }
+
+    pub fn popup(&self, client_width: Option<u16>) -> PopupSize {
+        let Some(width) = client_width else {
+            return self.popup.clone();
+        };
+        self.profiles
+            .iter()
+            .find(|profile| profile.matches(width))
+            .map(PopupProfile::size)
+            .unwrap_or_else(|| self.popup.clone())
     }
 }
 
@@ -105,6 +174,22 @@ struct FileConfig {
     enabled_builtin_patterns: Option<Vec<String>>,
     #[serde(default)]
     patterns: Vec<PatternDefinition>,
+    popup: Option<PopupSize>,
+    profiles: Option<Vec<PopupProfile>>,
+}
+
+impl PopupProfile {
+    fn matches(&self, width: u16) -> bool {
+        self.min_client_width.is_none_or(|min| width >= min)
+            && self.max_client_width.is_none_or(|max| width <= max)
+    }
+
+    fn size(&self) -> PopupSize {
+        PopupSize {
+            width: self.width.clone(),
+            height: self.height.clone(),
+        }
+    }
 }
 
 fn definitions(
@@ -124,11 +209,53 @@ fn validate_alphabet(alphabet: &[char]) -> Result<()> {
     if unique.len() != alphabet.len() {
         bail!("alphabet keys must be unique");
     }
-    if alphabet
+    if alphabet.iter().any(|key| !key.is_ascii_lowercase()) {
+        bail!("alphabet must use lower-case ASCII keys");
+    }
+    let conflicts = alphabet
         .iter()
-        .any(|key| !key.is_ascii_lowercase() || *key == 'q')
-    {
-        bail!("alphabet must use lower-case ASCII keys and cannot contain q");
+        .copied()
+        .filter(|key| RESERVED_HINT_KEYS.contains(*key))
+        .collect::<String>();
+    if !conflicts.is_empty() {
+        bail!("alphabet contains reserved normal-mode keys: {conflicts}");
+    }
+    Ok(())
+}
+
+fn validate_profiles(profiles: &[PopupProfile]) -> Result<()> {
+    for profile in profiles {
+        if profile.name.trim().is_empty() {
+            bail!("popup profile name cannot be empty");
+        }
+        if profile
+            .min_client_width
+            .zip(profile.max_client_width)
+            .is_some_and(|(min, max)| min > max)
+        {
+            bail!(
+                "popup profile '{}' has min width above max width",
+                profile.name
+            );
+        }
+        validate_popup(&profile.size())?;
+    }
+    Ok(())
+}
+
+fn validate_popup(popup: &PopupSize) -> Result<()> {
+    for (name, value) in [("width", &popup.width), ("height", &popup.height)] {
+        let valid = value.strip_suffix('%').map_or_else(
+            || value.parse::<u16>().is_ok_and(|cells| cells > 0),
+            |percent| {
+                percent
+                    .parse::<u16>()
+                    .is_ok_and(|number| (1..=100).contains(&number))
+            },
+        );
+        if !valid {
+            bail!("popup {name} '{value}' must be positive cells or 1%-100%");
+        }
     }
     Ok(())
 }
@@ -228,5 +355,28 @@ regex = "("
         let error = Config::load(&path).unwrap_err().to_string();
 
         assert!(error.contains("alphabet") || error.contains("broken"));
+    }
+
+    #[test]
+    fn popup_profiles_are_responsive_and_first_match_wins() {
+        let config = Config::default();
+
+        assert_eq!(config.popup(Some(300)).width, "95%");
+        assert_eq!(config.popup(Some(330)).width, "90%");
+        assert_eq!(config.popup(Some(380)).width, "90%");
+        assert_eq!(config.popup(Some(512)).width, "70%");
+        assert_eq!(config.popup(Some(512)).height, "90%");
+    }
+
+    #[test]
+    fn hint_alphabet_rejects_normal_mode_commands() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "alphabet = \"asj\"\n").unwrap();
+
+        let error = Config::load(&path).unwrap_err().to_string();
+
+        assert!(error.contains("reserved"));
+        assert!(error.contains('j'));
     }
 }

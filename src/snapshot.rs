@@ -14,6 +14,8 @@ use crate::herdr::{ClosePluginPaneOutcome, Herdr, InvocationContext, Layout};
 use crate::hints::generate_hints;
 use crate::matcher::{find_targets, Occurrence};
 
+pub const CAPTURE_ROWS: u32 = 1_000;
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PaneSnapshot {
     pub pane_id: String,
@@ -40,8 +42,12 @@ pub struct RunSnapshot {
     pub source_cwd: Option<String>,
     pub layout: Layout,
     pub panes: Vec<PaneSnapshot>,
+    pub text: String,
+    pub ansi: String,
+    pub history_limited: bool,
     pub targets: Vec<TabTarget>,
     pub hints: Vec<String>,
+    pub alphabet: Vec<char>,
 }
 
 fn find_tab_targets(panes: &[PaneSnapshot], config: &Config) -> Result<Vec<TabTarget>> {
@@ -77,7 +83,6 @@ fn find_tab_targets(panes: &[PaneSnapshot], config: &Config) -> Result<Vec<TabTa
 pub enum LaunchOutcome {
     Opened { run_id: String },
     Closed { pane_id: String },
-    NoMatches,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -301,45 +306,40 @@ pub fn launch(
     }
     let source_pane_id = context.source_pane_id()?;
     let layout = herdr.layout(source_pane_id)?;
-    if !layout
+    let source = layout
         .panes
         .iter()
-        .any(|pane| pane.pane_id == source_pane_id)
-    {
-        bail!("focused pane is missing from its tab layout");
-    }
-
-    let mut panes = Vec::with_capacity(layout.panes.len());
-    let mut source_cwd = context.focused_pane_cwd.clone();
-    for pane in &layout.panes {
-        let info = herdr.pane_info(&pane.pane_id)?;
-        if pane.pane_id == source_pane_id && source_cwd.is_none() {
-            source_cwd = info.cwd.clone();
-        }
-        panes.push(PaneSnapshot {
-            pane_id: pane.pane_id.clone(),
-            viewport_rows: info.viewport_rows,
-            text: herdr.read_visible(&pane.pane_id, false)?,
-            ansi: herdr.read_visible(&pane.pane_id, true)?,
-        });
-    }
-
+        .find(|pane| pane.pane_id == source_pane_id)
+        .context("focused pane is missing from its tab layout")?;
+    let (text, ansi, history_limited) = capture_history(herdr, source_pane_id)?;
+    let panes = vec![PaneSnapshot {
+        pane_id: source_pane_id.to_string(),
+        viewport_rows: source.rect.height,
+        text: text.clone(),
+        ansi: ansi.clone(),
+    }];
     let targets = find_tab_targets(&panes, config)?;
-    if targets.is_empty() {
-        herdr.notify("No targets in the visible tab")?;
-        return Ok(LaunchOutcome::NoMatches);
-    }
     let hints = generate_hints(&config.alphabet, targets.len())?;
     let snapshot = RunSnapshot {
         source_pane_id: source_pane_id.to_string(),
-        source_cwd,
+        source_cwd: context.focused_pane_cwd.clone(),
         layout,
         panes,
+        text,
+        ansi,
+        history_limited,
         targets,
         hints,
+        alphabet: config.alphabet.clone(),
     };
     let run_id = store.write(&snapshot)?;
-    let pane_id = match herdr.open_picker(&run_id) {
+    let client_width = snapshot
+        .layout
+        .area
+        .x
+        .saturating_add(snapshot.layout.area.width);
+    let popup = config.popup(Some(client_width));
+    let pane_id = match herdr.open_picker(&run_id, &popup) {
         Ok(pane_id) => pane_id,
         Err(error) => {
             let _ = store.remove(&run_id);
@@ -352,6 +352,36 @@ pub fn launch(
         return Err(error);
     }
     Ok(LaunchOutcome::Opened { run_id })
+}
+
+fn capture_history(herdr: &Herdr, pane_id: &str) -> Result<(String, String, bool)> {
+    let recent_text =
+        normalize_newlines(herdr.read_recent_unwrapped(pane_id, false, CAPTURE_ROWS)?);
+    let recent_ansi =
+        normalize_newlines(herdr.read_recent_unwrapped(pane_id, true, CAPTURE_ROWS)?);
+    let (text, ansi) = if recent_text.trim().is_empty() {
+        (
+            normalize_newlines(herdr.read_visible(pane_id, false)?),
+            normalize_newlines(herdr.read_visible(pane_id, true)?),
+        )
+    } else {
+        (recent_text, recent_ansi)
+    };
+    let ansi = if row_count(&ansi) == row_count(&text) {
+        ansi
+    } else {
+        text.clone()
+    };
+    let history_limited = row_count(&text) >= CAPTURE_ROWS as usize;
+    Ok((text, ansi, history_limited))
+}
+
+fn normalize_newlines(text: String) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn row_count(text: &str) -> usize {
+    text.split_terminator('\n').count().max(1)
 }
 
 pub fn launch_with_reporting(
@@ -435,6 +465,9 @@ mod tests {
                 text: "deadbeef\n".into(),
                 ansi: "\u{1b}[33mdeadbeef\u{1b}[0m\n".into(),
             }],
+            text: "deadbeef\n".into(),
+            ansi: "\u{1b}[33mdeadbeef\u{1b}[0m\n".into(),
+            history_limited: false,
             targets: vec![TabTarget {
                 text: "deadbeef".into(),
                 occurrences: vec![TargetOccurrence {
@@ -449,6 +482,7 @@ mod tests {
                 }],
             }],
             hints: vec!["a".into()],
+            alphabet: vec!['a', 's'],
         }
     }
 
