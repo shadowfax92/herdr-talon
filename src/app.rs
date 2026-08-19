@@ -1,16 +1,15 @@
+use anyhow::Result;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ActionKind {
-    Copy,
-    Paste,
-    Open,
-    MultiCopy,
-}
+use crate::{
+    document::{SelectionKind, SourcePosition, WrappedDocument},
+    hints::generate_hints,
+    matcher::Target,
+    snapshot::RunSnapshot,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Completion {
-    pub kind: ActionKind,
     pub text: String,
 }
 
@@ -21,119 +20,270 @@ pub enum InputOutcome {
     Cancel,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickerMode {
+    Browse,
+    VisualCharacter,
+    VisualLine,
+    Search,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VisibleHint {
+    pub target_index: usize,
+    pub label: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub start: SourcePosition,
+    pub end: SourcePosition,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Browse,
+    Visual {
+        anchor: SourcePosition,
+        kind: SelectionKind,
+    },
+    Search,
+}
+
 #[derive(Clone, Debug)]
 pub struct PickerState {
-    hints: Vec<String>,
-    input: String,
-    multi_mode: bool,
-    selected: Vec<usize>,
+    document: WrappedDocument,
+    targets: Vec<Target>,
+    alphabet: Vec<char>,
+    mode: Mode,
+    cursor: SourcePosition,
+    desired_column: u16,
+    top: usize,
+    viewport_height: usize,
+    initialized: bool,
+    visible_hints: Vec<VisibleHint>,
+    hint_input: String,
+    committed_search: String,
+    search_input: String,
+    search_origin: Option<SourcePosition>,
+    search_matches: Vec<SearchMatch>,
     error: Option<String>,
 }
 
 impl PickerState {
-    pub fn new(hints: Vec<String>) -> Self {
-        Self {
-            hints,
-            input: String::new(),
-            multi_mode: false,
-            selected: Vec::new(),
+    pub fn new(snapshot: &RunSnapshot) -> Result<Self> {
+        generate_hints(&snapshot.alphabet, 1)?;
+        let document = WrappedDocument::new(&snapshot.text, &snapshot.ansi, 1);
+        let cursor = document.last_position();
+        Ok(Self {
+            document,
+            targets: snapshot.targets.clone(),
+            alphabet: snapshot.alphabet.clone(),
+            mode: Mode::Browse,
+            cursor,
+            desired_column: 0,
+            top: 0,
+            viewport_height: 1,
+            initialized: false,
+            visible_hints: Vec::new(),
+            hint_input: String::new(),
+            committed_search: String::new(),
+            search_input: String::new(),
+            search_origin: None,
+            search_matches: Vec::new(),
             error: None,
-        }
+        })
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent, targets: &[String]) -> InputOutcome {
-        if key.kind != KeyEventKind::Press {
-            return InputOutcome::Continue;
+    pub fn set_viewport(&mut self, width: u16, height: u16) {
+        self.document.reflow(width.max(1));
+        self.viewport_height = usize::from(height.max(1));
+        if self.initialized {
+            self.ensure_cursor_visible();
+        } else {
+            self.cursor = self.document.last_position();
+            self.top = self
+                .document
+                .visual_rows()
+                .len()
+                .saturating_sub(self.viewport_height);
+            self.initialized = true;
         }
-        if key.code == KeyCode::Esc
-            || matches!(key.code, KeyCode::Char('q' | 'Q'))
-            || (matches!(key.code, KeyCode::Char('c' | 'C'))
-                && key.modifiers.contains(KeyModifiers::CONTROL))
-        {
-            return InputOutcome::Cancel;
-        }
-        if key.code == KeyCode::Tab {
-            self.input.clear();
-            self.error = None;
-            if !self.multi_mode {
-                self.multi_mode = true;
-                return InputOutcome::Continue;
-            }
-            if self.selected.is_empty() {
-                return InputOutcome::Cancel;
-            }
-            let text = self
-                .selected
-                .iter()
-                .filter_map(|index| targets.get(*index))
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(" ");
-            return InputOutcome::Complete(Completion {
-                kind: ActionKind::MultiCopy,
-                text,
-            });
-        }
-        if key.code == KeyCode::Backspace {
-            self.input.pop();
-            self.error = None;
-            return InputOutcome::Continue;
-        }
-        let KeyCode::Char(character) = key.code else {
-            return InputOutcome::Continue;
-        };
-        if !character.is_ascii_alphabetic() {
-            return InputOutcome::Continue;
-        }
-
-        self.error = None;
-        self.input.push(character.to_ascii_lowercase());
-        if let Some(index) = self.hints.iter().position(|hint| hint == &self.input) {
-            self.input.clear();
-            let Some(text) = targets.get(index).cloned() else {
-                self.error = Some("Target snapshot is inconsistent".into());
-                return InputOutcome::Continue;
-            };
-            if self.multi_mode {
-                if !self.selected.contains(&index) {
-                    self.selected.push(index);
-                }
-                return InputOutcome::Continue;
-            }
-            let kind = if key.modifiers.contains(KeyModifiers::CONTROL) {
-                ActionKind::Open
-            } else if key.modifiers.contains(KeyModifiers::SHIFT) {
-                ActionKind::Paste
-            } else {
-                ActionKind::Copy
-            };
-            return InputOutcome::Complete(Completion { kind, text });
-        }
-        if self.hints.iter().any(|hint| hint.starts_with(&self.input)) {
-            return InputOutcome::Continue;
-        }
-        self.input.clear();
-        self.error = Some("Unknown hint".into());
-        InputOutcome::Continue
+        self.desired_column = self.document.visual_column_for(self.cursor);
+        self.refresh_hints();
     }
 
-    pub fn handle_event(&mut self, event: Event, targets: &[String]) -> InputOutcome {
+    pub fn handle_event(&mut self, event: Event) -> InputOutcome {
         match event {
-            Event::Key(key) => self.handle_key(key, targets),
+            Event::Key(key) => self.handle_key(key),
             _ => InputOutcome::Continue,
         }
     }
 
-    pub fn input(&self) -> &str {
-        &self.input
+    pub fn handle_key(&mut self, key: KeyEvent) -> InputOutcome {
+        if key.kind != KeyEventKind::Press {
+            return InputOutcome::Continue;
+        }
+        if matches!(key.code, KeyCode::Char('c' | 'C'))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            return InputOutcome::Cancel;
+        }
+        if matches!(self.mode, Mode::Search) {
+            return self.handle_search_key(key);
+        }
+        if key.code == KeyCode::Esc {
+            if matches!(self.mode, Mode::Visual { .. }) {
+                self.mode = Mode::Browse;
+                self.error = None;
+                return InputOutcome::Continue;
+            }
+            if !self.hint_input.is_empty() {
+                self.hint_input.clear();
+                self.error = None;
+                return InputOutcome::Continue;
+            }
+            return InputOutcome::Cancel;
+        }
+        if matches!(key.code, KeyCode::Char('q' | 'Q')) {
+            return InputOutcome::Cancel;
+        }
+        if matches!(self.mode, Mode::Visual { .. }) && matches!(key.code, KeyCode::Char('y' | 'Y'))
+        {
+            let text = self.selected_text().unwrap_or_default();
+            if text.is_empty() {
+                self.error = Some("Selection is empty".into());
+                return InputOutcome::Continue;
+            }
+            return InputOutcome::Complete(Completion { text });
+        }
+        if matches!(self.mode, Mode::Browse) {
+            match key.code {
+                KeyCode::Char('v') if key.modifiers.is_empty() => {
+                    self.start_selection(SelectionKind::Character);
+                    return InputOutcome::Continue;
+                }
+                KeyCode::Char('V') | KeyCode::Char('v')
+                    if key.modifiers.contains(KeyModifiers::SHIFT) =>
+                {
+                    self.start_selection(SelectionKind::Line);
+                    return InputOutcome::Continue;
+                }
+                KeyCode::Char('/') => {
+                    self.start_search();
+                    return InputOutcome::Continue;
+                }
+                KeyCode::Char('n') if key.modifiers.is_empty() => {
+                    self.repeat_search(true);
+                    return InputOutcome::Continue;
+                }
+                KeyCode::Char('N') | KeyCode::Char('n')
+                    if key.modifiers.contains(KeyModifiers::SHIFT) =>
+                {
+                    self.repeat_search(false);
+                    return InputOutcome::Continue;
+                }
+                _ => {}
+            }
+        }
+        if self.handle_motion(key) {
+            return InputOutcome::Continue;
+        }
+        if matches!(self.mode, Mode::Browse) && key.code == KeyCode::Backspace {
+            self.hint_input.pop();
+            self.error = None;
+            return InputOutcome::Continue;
+        }
+        if matches!(self.mode, Mode::Browse) {
+            if let KeyCode::Char(character) = key.code {
+                let character = character.to_ascii_lowercase();
+                if self.alphabet.contains(&character) {
+                    return self.handle_hint(character);
+                }
+            }
+        }
+        InputOutcome::Continue
     }
 
-    pub fn multi_mode(&self) -> bool {
-        self.multi_mode
+    pub fn mode(&self) -> PickerMode {
+        match self.mode {
+            Mode::Browse => PickerMode::Browse,
+            Mode::Visual {
+                kind: SelectionKind::Character,
+                ..
+            } => PickerMode::VisualCharacter,
+            Mode::Visual {
+                kind: SelectionKind::Line,
+                ..
+            } => PickerMode::VisualLine,
+            Mode::Search => PickerMode::Search,
+        }
     }
 
-    pub fn selected(&self) -> &[usize] {
-        &self.selected
+    pub fn document(&self) -> &WrappedDocument {
+        &self.document
+    }
+
+    pub fn targets(&self) -> &[Target] {
+        &self.targets
+    }
+
+    pub fn cursor(&self) -> SourcePosition {
+        self.cursor
+    }
+
+    pub fn top(&self) -> usize {
+        self.top
+    }
+
+    pub fn viewport_height(&self) -> usize {
+        self.viewport_height
+    }
+
+    pub fn visible_hints(&self) -> &[VisibleHint] {
+        &self.visible_hints
+    }
+
+    pub fn hint_for_target(&self, target_index: usize) -> Option<&str> {
+        self.visible_hints
+            .iter()
+            .find(|hint| hint.target_index == target_index)
+            .map(|hint| hint.label.as_str())
+    }
+
+    pub fn hint_is_active(&self, target_index: usize) -> bool {
+        self.hint_input.is_empty()
+            || self
+                .hint_for_target(target_index)
+                .is_some_and(|hint| hint.starts_with(&self.hint_input))
+    }
+
+    pub fn hint_input(&self) -> &str {
+        &self.hint_input
+    }
+
+    pub fn selection(&self) -> Option<(SourcePosition, SourcePosition, SelectionKind)> {
+        let Mode::Visual { anchor, kind } = self.mode else {
+            return None;
+        };
+        Some((anchor, self.cursor, kind))
+    }
+
+    pub fn selected_text(&self) -> Option<String> {
+        self.selection()
+            .map(|(anchor, cursor, kind)| self.document.selected_text(anchor, cursor, kind))
+    }
+
+    pub fn search_query(&self) -> &str {
+        if matches!(self.mode, Mode::Search) {
+            &self.search_input
+        } else {
+            &self.committed_search
+        }
+    }
+
+    pub fn search_matches(&self) -> &[SearchMatch] {
+        &self.search_matches
     }
 
     pub fn error(&self) -> Option<&str> {
@@ -144,142 +294,504 @@ impl PickerState {
         self.error = Some(error.into());
     }
 
-    pub fn is_visible(&self, index: usize) -> bool {
-        self.selected.contains(&index)
-            || self.input.is_empty()
-            || self
-                .hints
-                .get(index)
-                .is_some_and(|hint| hint.starts_with(&self.input))
+    pub fn visual_position(&self) -> (usize, usize) {
+        (
+            self.document.visual_row_for(self.cursor).saturating_add(1),
+            self.document.visual_rows().len(),
+        )
     }
+
+    fn handle_motion(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => self.move_vertical(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_vertical(1),
+            KeyCode::Left | KeyCode::Char('h') => self.move_left(),
+            KeyCode::Right | KeyCode::Char('l') => self.move_right(),
+            KeyCode::Home | KeyCode::Char('0') => self.move_line_start(),
+            KeyCode::End | KeyCode::Char('$') => self.move_line_end(),
+            KeyCode::PageUp => self.move_page(-1),
+            KeyCode::PageDown => self.move_page(1),
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_visual(-((self.viewport_height / 2).max(1) as isize))
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_visual((self.viewport_height / 2).max(1) as isize)
+            }
+            KeyCode::Char('g') if key.modifiers.is_empty() => {
+                self.move_to(self.document.first_position())
+            }
+            KeyCode::Char('G') | KeyCode::Char('g')
+                if key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                self.move_to(self.document.last_position())
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn move_vertical(&mut self, delta: isize) {
+        if matches!(
+            self.mode,
+            Mode::Visual {
+                kind: SelectionKind::Line,
+                ..
+            }
+        ) {
+            let row = self
+                .cursor
+                .row
+                .saturating_add_signed(delta)
+                .min(self.document.lines().len().saturating_sub(1));
+            self.cursor = SourcePosition::new(
+                row,
+                self.cursor
+                    .column
+                    .min(self.document.line_len(row).saturating_sub(1)),
+            );
+            self.after_motion(true);
+        } else {
+            self.move_visual(delta);
+        }
+    }
+
+    fn move_visual(&mut self, delta: isize) {
+        let current = self.document.visual_row_for(self.cursor);
+        let last = self.document.visual_rows().len().saturating_sub(1);
+        let target = current.saturating_add_signed(delta).min(last);
+        self.cursor = self.document.position_at(target, self.desired_column);
+        self.after_motion(false);
+    }
+
+    fn move_page(&mut self, direction: isize) {
+        let distance = self.viewport_height.max(1);
+        let delta = direction.saturating_mul(distance as isize);
+        let current = self.document.visual_row_for(self.cursor);
+        let last = self.document.visual_rows().len().saturating_sub(1);
+        let target = current.saturating_add_signed(delta).min(last);
+        self.cursor = self.document.position_at(target, self.desired_column);
+        self.top = self
+            .top
+            .saturating_add_signed(delta)
+            .min(self.document.visual_rows().len().saturating_sub(distance));
+        self.hint_input.clear();
+        self.error = None;
+        self.refresh_hints();
+    }
+
+    fn move_left(&mut self) {
+        self.cursor.column = self.cursor.column.saturating_sub(1);
+        self.after_motion(true);
+    }
+
+    fn move_right(&mut self) {
+        self.cursor.column = self
+            .cursor
+            .column
+            .saturating_add(1)
+            .min(self.document.line_len(self.cursor.row).saturating_sub(1));
+        self.after_motion(true);
+    }
+
+    fn move_line_start(&mut self) {
+        self.cursor.column = 0;
+        self.after_motion(true);
+    }
+
+    fn move_line_end(&mut self) {
+        self.cursor.column = self.document.line_len(self.cursor.row).saturating_sub(1);
+        self.after_motion(true);
+    }
+
+    fn move_to(&mut self, position: SourcePosition) {
+        self.cursor = self.document.clamp_position(position);
+        self.after_motion(true);
+    }
+
+    fn after_motion(&mut self, update_desired_column: bool) {
+        if update_desired_column {
+            self.desired_column = self.document.visual_column_for(self.cursor);
+        }
+        self.hint_input.clear();
+        self.error = None;
+        self.ensure_cursor_visible();
+        self.refresh_hints();
+    }
+
+    fn ensure_cursor_visible(&mut self) {
+        let cursor_row = self.document.visual_row_for(self.cursor);
+        if cursor_row < self.top {
+            self.top = cursor_row;
+        } else if cursor_row >= self.top.saturating_add(self.viewport_height) {
+            self.top = cursor_row
+                .saturating_add(1)
+                .saturating_sub(self.viewport_height);
+        }
+        self.top = self.top.min(
+            self.document
+                .visual_rows()
+                .len()
+                .saturating_sub(self.viewport_height),
+        );
+    }
+
+    fn start_selection(&mut self, kind: SelectionKind) {
+        self.mode = Mode::Visual {
+            anchor: self.cursor,
+            kind,
+        };
+        self.hint_input.clear();
+        self.error = None;
+    }
+
+    fn start_search(&mut self) {
+        self.mode = Mode::Search;
+        self.search_origin = Some(self.cursor);
+        self.search_input.clear();
+        self.search_matches.clear();
+        self.hint_input.clear();
+        self.error = None;
+    }
+
+    fn handle_search_key(&mut self, key: KeyEvent) -> InputOutcome {
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(origin) = self.search_origin.take() {
+                    self.cursor = origin;
+                }
+                self.mode = Mode::Browse;
+                self.search_input.clear();
+                self.rebuild_search_matches(false);
+                self.after_motion(true);
+            }
+            KeyCode::Enter => {
+                if !self.search_input.is_empty() {
+                    self.committed_search.clone_from(&self.search_input);
+                }
+                self.mode = Mode::Browse;
+                self.search_origin = None;
+                self.rebuild_search_matches(false);
+                self.error = None;
+            }
+            KeyCode::Backspace => {
+                self.search_input.pop();
+                self.rebuild_search_matches(true);
+            }
+            KeyCode::Char(character)
+                if !key.modifiers.intersects(
+                    KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                ) && !character.is_control() =>
+            {
+                self.search_input.push(character);
+                self.rebuild_search_matches(true);
+            }
+            _ => {}
+        }
+        InputOutcome::Continue
+    }
+
+    fn rebuild_search_matches(&mut self, preview: bool) {
+        let query = if matches!(self.mode, Mode::Search) {
+            self.search_input.as_str()
+        } else {
+            self.committed_search.as_str()
+        };
+        self.search_matches = find_search_matches(self.document.lines(), query);
+        if query.is_empty() {
+            self.error = None;
+            return;
+        }
+        if self.search_matches.is_empty() {
+            self.error = Some(format!("No matches for /{query}"));
+            return;
+        }
+        self.error = None;
+        if preview {
+            let origin = self.search_origin.unwrap_or(self.cursor);
+            let next = self
+                .search_matches
+                .iter()
+                .find(|matched| matched.start.row >= origin.row)
+                .unwrap_or(&self.search_matches[0]);
+            self.cursor = next.start;
+            self.desired_column = self.document.visual_column_for(self.cursor);
+            self.ensure_cursor_visible();
+            self.refresh_hints();
+        }
+    }
+
+    fn repeat_search(&mut self, forward: bool) {
+        if self.committed_search.is_empty() {
+            return;
+        }
+        self.rebuild_search_matches(false);
+        if self.search_matches.is_empty() {
+            return;
+        }
+        let current = self
+            .search_matches
+            .iter()
+            .position(|matched| matched.start == self.cursor);
+        let index = if forward {
+            current.map_or_else(
+                || {
+                    self.search_matches
+                        .iter()
+                        .position(|matched| matched.start > self.cursor)
+                        .unwrap_or(0)
+                },
+                |index| (index + 1) % self.search_matches.len(),
+            )
+        } else {
+            current.map_or_else(
+                || {
+                    self.search_matches
+                        .iter()
+                        .rposition(|matched| matched.start < self.cursor)
+                        .unwrap_or(self.search_matches.len() - 1)
+                },
+                |index| {
+                    index
+                        .checked_sub(1)
+                        .unwrap_or(self.search_matches.len() - 1)
+                },
+            )
+        };
+        self.cursor = self.search_matches[index].start;
+        self.after_motion(true);
+    }
+
+    fn handle_hint(&mut self, character: char) -> InputOutcome {
+        self.error = None;
+        self.hint_input.push(character);
+        if let Some(hint) = self
+            .visible_hints
+            .iter()
+            .find(|hint| hint.label == self.hint_input)
+        {
+            let text = self.targets[hint.target_index].text.clone();
+            return InputOutcome::Complete(Completion { text });
+        }
+        if self
+            .visible_hints
+            .iter()
+            .any(|hint| hint.label.starts_with(&self.hint_input))
+        {
+            return InputOutcome::Continue;
+        }
+        self.hint_input.clear();
+        self.error = Some("Unknown hint".into());
+        InputOutcome::Continue
+    }
+
+    fn refresh_hints(&mut self) {
+        let bottom = self.top.saturating_add(self.viewport_height);
+        let target_indices = self
+            .targets
+            .iter()
+            .enumerate()
+            .filter_map(|(index, target)| {
+                target
+                    .occurrences
+                    .iter()
+                    .filter_map(|occurrence| self.document.hint_anchor(occurrence))
+                    .any(|anchor| anchor.row >= self.top && anchor.row < bottom)
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let labels = generate_hints(&self.alphabet, target_indices.len()).unwrap_or_default();
+        self.visible_hints = target_indices
+            .into_iter()
+            .zip(labels)
+            .map(|(target_index, label)| VisibleHint {
+                target_index,
+                label,
+            })
+            .collect();
+    }
+}
+
+fn find_search_matches(lines: &[String], query: &str) -> Vec<SearchMatch> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    lines
+        .iter()
+        .enumerate()
+        .flat_map(|(row, line)| {
+            line.match_indices(query).map(move |(byte, matched)| {
+                let start = line[..byte].chars().count();
+                let end = start
+                    .saturating_add(matched.chars().count())
+                    .saturating_sub(1);
+                SearchMatch {
+                    start: SourcePosition::new(row, start),
+                    end: SourcePosition::new(row, end),
+                }
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use crate::{config::PatternDefinition, matcher::find_targets, snapshot::RunSnapshot};
 
     use super::*;
 
-    fn key(character: char, modifiers: KeyModifiers) -> KeyEvent {
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn modified(character: char, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(character), modifiers)
     }
 
-    fn targets() -> Vec<String> {
-        vec!["alpha".into(), "beta".into(), "gamma".into()]
-    }
-
-    #[test]
-    fn progressive_hint_completes_with_the_final_modifier() {
-        let mut state = PickerState::new(vec!["as".into(), "ad".into(), "f".into()]);
-
-        assert_eq!(
-            state.handle_key(key('a', KeyModifiers::NONE), &targets()),
-            InputOutcome::Continue
-        );
-        assert_eq!(state.input(), "a");
-        assert!(state.is_visible(0));
-        assert!(state.is_visible(1));
-        assert!(!state.is_visible(2));
-        assert_eq!(
-            state.handle_key(key('S', KeyModifiers::SHIFT), &targets()),
-            InputOutcome::Complete(Completion {
-                kind: ActionKind::Paste,
-                text: "alpha".into(),
-            })
-        );
-    }
-
-    #[test]
-    fn plain_and_control_completions_choose_copy_and_open() {
-        let mut state = PickerState::new(vec!["a".into(), "s".into(), "d".into()]);
-        assert_eq!(
-            state.handle_key(key('a', KeyModifiers::NONE), &targets()),
-            InputOutcome::Complete(Completion {
-                kind: ActionKind::Copy,
-                text: "alpha".into(),
-            })
-        );
-
-        let mut state = PickerState::new(vec!["a".into(), "s".into(), "d".into()]);
-        assert_eq!(
-            state.handle_key(key('s', KeyModifiers::CONTROL), &targets()),
-            InputOutcome::Complete(Completion {
-                kind: ActionKind::Open,
-                text: "beta".into(),
-            })
-        );
-    }
-
-    #[test]
-    fn multi_select_preserves_order_and_ignores_duplicates() {
-        let mut state = PickerState::new(vec!["a".into(), "s".into(), "d".into()]);
-        assert_eq!(
-            state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &targets()),
-            InputOutcome::Continue
-        );
-        assert_eq!(
-            state.handle_key(key('s', KeyModifiers::NONE), &targets()),
-            InputOutcome::Continue
-        );
-        assert_eq!(
-            state.handle_key(key('a', KeyModifiers::NONE), &targets()),
-            InputOutcome::Continue
-        );
-        assert_eq!(
-            state.handle_key(key('s', KeyModifiers::NONE), &targets()),
-            InputOutcome::Continue
-        );
-
-        assert_eq!(state.selected(), &[1, 0]);
-        assert_eq!(
-            state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &targets()),
-            InputOutcome::Complete(Completion {
-                kind: ActionKind::MultiCopy,
-                text: "beta alpha".into(),
-            })
-        );
-    }
-
-    #[test]
-    fn cancel_keys_release_without_an_action_and_resize_is_deferred() {
-        for key in [
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-            key('q', KeyModifiers::NONE),
-            key('c', KeyModifiers::CONTROL),
-        ] {
-            let mut state = PickerState::new(vec!["a".into()]);
-            assert_eq!(state.handle_key(key, &targets()), InputOutcome::Cancel);
+    fn snapshot(text: &str) -> RunSnapshot {
+        let patterns = vec![PatternDefinition {
+            name: "ticket".into(),
+            regex: "TKT-[0-9]+".into(),
+        }];
+        RunSnapshot {
+            source_pane_id: "w1:p1".into(),
+            text: text.into(),
+            ansi: text.into(),
+            history_limited: false,
+            targets: find_targets(text, &patterns).unwrap(),
+            alphabet: vec!['a', 's', 'd'],
         }
-        let mut state = PickerState::new(vec!["a".into()]);
-        let release = KeyEvent {
-            kind: KeyEventKind::Release,
-            ..key('a', KeyModifiers::NONE)
-        };
-        assert_eq!(
-            state.handle_key(release, &targets()),
-            InputOutcome::Continue
-        );
-        assert_eq!(
-            state.handle_event(Event::Resize(100, 40), &targets()),
-            InputOutcome::Continue
-        );
     }
 
     #[test]
-    fn invalid_prefix_resets_and_action_errors_are_clearable() {
-        let mut state = PickerState::new(vec!["as".into()]);
-        state.set_error("pbcopy failed");
+    fn opens_at_newest_output_and_supports_copy_mode_motions() {
+        let text = (0..10)
+            .map(|row| format!("line {row}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut state = PickerState::new(&snapshot(&text)).unwrap();
+        state.set_viewport(20, 3);
+
+        assert_eq!(state.top(), 7);
+        assert_eq!(state.cursor().row, 9);
+
+        state.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(state.cursor().row, 8);
+        state.handle_key(key(KeyCode::PageUp));
+        assert_eq!(state.cursor().row, 5);
+        state.handle_key(modified('u', KeyModifiers::CONTROL));
+        assert_eq!(state.cursor().row, 4);
+        state.handle_key(key(KeyCode::Char('g')));
+        assert_eq!(state.cursor().row, 0);
+        state.handle_key(modified('G', KeyModifiers::SHIFT));
+        assert_eq!(state.cursor().row, 9);
+    }
+
+    #[test]
+    fn visible_hints_reassign_after_navigation_and_copy_the_target() {
+        let mut state = PickerState::new(&snapshot("TKT-1000\nplain\nTKT-2000\nTKT-3000")).unwrap();
+        state.set_viewport(20, 2);
 
         assert_eq!(
-            state.handle_key(key('z', KeyModifiers::NONE), &targets()),
-            InputOutcome::Continue
+            state
+                .visible_hints()
+                .iter()
+                .map(|hint| (hint.target_index, hint.label.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "a"), (2, "s")]
         );
-        assert_eq!(state.input(), "");
-        assert!(state.error().unwrap().contains("Unknown hint"));
         assert_eq!(
-            state.handle_key(key('a', KeyModifiers::NONE), &targets()),
-            InputOutcome::Continue
+            state.handle_key(key(KeyCode::Char('a'))),
+            InputOutcome::Complete(Completion {
+                text: "TKT-2000".into()
+            })
         );
-        assert!(state.error().is_none());
+
+        let mut state = PickerState::new(&snapshot("TKT-1000\nplain\nTKT-2000\nTKT-3000")).unwrap();
+        state.set_viewport(20, 2);
+        state.handle_key(key(KeyCode::Char('a')));
+        state.handle_key(key(KeyCode::PageUp));
+
+        assert!(state.hint_input().is_empty());
+        assert_eq!(state.visible_hints()[0].target_index, 0);
+        assert_eq!(state.visible_hints()[0].label, "a");
+    }
+
+    #[test]
+    fn visual_selection_copies_exact_text_across_soft_and_logical_wraps() {
+        let mut state = PickerState::new(&snapshot("abcdef\nsecond")).unwrap();
+        state.set_viewport(3, 5);
+        state.handle_key(key(KeyCode::Char('g')));
+        state.handle_key(key(KeyCode::Char('l')));
+        state.handle_key(key(KeyCode::Char('v')));
+        for _ in 0..3 {
+            state.handle_key(key(KeyCode::Char('l')));
+        }
+
+        assert_eq!(state.selected_text().as_deref(), Some("bcde"));
+        assert_eq!(
+            state.handle_key(key(KeyCode::Char('y'))),
+            InputOutcome::Complete(Completion {
+                text: "bcde".into()
+            })
+        );
+
+        let mut state = PickerState::new(&snapshot("abcdef\nsecond")).unwrap();
+        state.set_viewport(3, 5);
+        state.handle_key(key(KeyCode::Char('g')));
+        state.handle_key(modified('V', KeyModifiers::SHIFT));
+        state.handle_key(key(KeyCode::Char('j')));
+
+        assert_eq!(state.selected_text().as_deref(), Some("abcdef\nsecond"));
+    }
+
+    #[test]
+    fn resize_preserves_logical_selection_and_reflows_in_place() {
+        let mut state = PickerState::new(&snapshot("abcdefghij")).unwrap();
+        state.set_viewport(6, 3);
+        state.handle_key(key(KeyCode::Char('g')));
+        state.handle_key(key(KeyCode::Char('l')));
+        state.handle_key(key(KeyCode::Char('v')));
+        for _ in 0..6 {
+            state.handle_key(key(KeyCode::Char('l')));
+        }
+        let selection = state.selection().unwrap();
+
+        state.set_viewport(3, 3);
+
+        assert_eq!(state.selection().unwrap(), selection);
+        assert_eq!(state.selected_text().as_deref(), Some("bcdefgh"));
+        assert_eq!(state.document().width(), 3);
+    }
+
+    #[test]
+    fn incremental_search_and_repeat_wrap_in_both_directions() {
+        let mut state =
+            PickerState::new(&snapshot("alpha\nneedle one\nmiddle\nneedle two")).unwrap();
+        state.set_viewport(20, 2);
+        state.handle_key(key(KeyCode::Char('/')));
+        for character in "needle".chars() {
+            state.handle_key(key(KeyCode::Char(character)));
+        }
+
+        assert_eq!(state.mode(), PickerMode::Search);
+        assert_eq!(state.cursor().row, 3);
+        assert_eq!(state.search_query(), "needle");
+        state.handle_key(key(KeyCode::Enter));
+        state.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(state.cursor().row, 1);
+        state.handle_key(modified('N', KeyModifiers::SHIFT));
+        assert_eq!(state.cursor().row, 3);
+    }
+
+    #[test]
+    fn escape_cancels_modes_before_closing_the_popup() {
+        let mut state = PickerState::new(&snapshot("abcdef")).unwrap();
+        state.set_viewport(20, 2);
+        state.handle_key(key(KeyCode::Char('v')));
+        assert_eq!(state.handle_key(key(KeyCode::Esc)), InputOutcome::Continue);
+        assert_eq!(state.mode(), PickerMode::Browse);
+        assert_eq!(state.handle_key(key(KeyCode::Esc)), InputOutcome::Cancel);
     }
 }

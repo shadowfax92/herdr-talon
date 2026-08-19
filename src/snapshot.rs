@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufReader, BufWriter, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -10,73 +9,19 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::herdr::{ClosePluginPaneOutcome, Herdr, InvocationContext, Layout};
-use crate::hints::generate_hints;
-use crate::matcher::{find_targets, Occurrence};
+use crate::herdr::{ClosePluginPaneOutcome, Herdr, InvocationContext};
+use crate::matcher::{find_targets, Target};
 
 pub const CAPTURE_ROWS: u32 = 1_000;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct PaneSnapshot {
-    pub pane_id: String,
-    pub viewport_rows: u16,
-    pub text: String,
-    pub ansi: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct TargetOccurrence {
-    pub pane_id: String,
-    pub occurrence: Occurrence,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct TabTarget {
-    pub text: String,
-    pub occurrences: Vec<TargetOccurrence>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RunSnapshot {
     pub source_pane_id: String,
-    pub source_cwd: Option<String>,
-    pub layout: Layout,
-    pub panes: Vec<PaneSnapshot>,
     pub text: String,
     pub ansi: String,
     pub history_limited: bool,
-    pub targets: Vec<TabTarget>,
-    pub hints: Vec<String>,
+    pub targets: Vec<Target>,
     pub alphabet: Vec<char>,
-}
-
-fn find_tab_targets(panes: &[PaneSnapshot], config: &Config) -> Result<Vec<TabTarget>> {
-    let mut targets = Vec::<TabTarget>::new();
-    let mut target_by_text = HashMap::<String, usize>::new();
-
-    for pane in panes {
-        for target in find_targets(&pane.text, &config.patterns)? {
-            let occurrences = target
-                .occurrences
-                .into_iter()
-                .map(|occurrence| TargetOccurrence {
-                    pane_id: pane.pane_id.clone(),
-                    occurrence,
-                });
-            if let Some(index) = target_by_text.get(&target.text).copied() {
-                targets[index].occurrences.extend(occurrences);
-            } else {
-                let index = targets.len();
-                target_by_text.insert(target.text.clone(), index);
-                targets.push(TabTarget {
-                    text: target.text,
-                    occurrences: occurrences.collect(),
-                });
-            }
-        }
-    }
-
-    Ok(targets)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -305,39 +250,18 @@ pub fn launch(
         }
     }
     let source_pane_id = context.source_pane_id()?;
-    let layout = herdr.layout(source_pane_id)?;
-    let source = layout
-        .panes
-        .iter()
-        .find(|pane| pane.pane_id == source_pane_id)
-        .context("focused pane is missing from its tab layout")?;
+    let client_width = herdr.client_width(source_pane_id)?;
     let (text, ansi, history_limited) = capture_history(herdr, source_pane_id)?;
-    let panes = vec![PaneSnapshot {
-        pane_id: source_pane_id.to_string(),
-        viewport_rows: source.rect.height,
-        text: text.clone(),
-        ansi: ansi.clone(),
-    }];
-    let targets = find_tab_targets(&panes, config)?;
-    let hints = generate_hints(&config.alphabet, targets.len())?;
+    let targets = find_targets(&text, &config.patterns)?;
     let snapshot = RunSnapshot {
         source_pane_id: source_pane_id.to_string(),
-        source_cwd: context.focused_pane_cwd.clone(),
-        layout,
-        panes,
         text,
         ansi,
         history_limited,
         targets,
-        hints,
         alphabet: config.alphabet.clone(),
     };
     let run_id = store.write(&snapshot)?;
-    let client_width = snapshot
-        .layout
-        .area
-        .x
-        .saturating_add(snapshot.layout.area.width);
     let popup = config.popup(Some(client_width));
     let pane_id = match herdr.open_picker(&run_id, &popup) {
         Ok(pane_id) => pane_id,
@@ -428,7 +352,6 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::herdr::{LayoutPane, Rect};
     use crate::matcher::Occurrence;
 
     use super::*;
@@ -436,52 +359,19 @@ mod tests {
     fn sample_snapshot() -> RunSnapshot {
         RunSnapshot {
             source_pane_id: "w1:p1".into(),
-            source_cwd: Some("/tmp/project".into()),
-            layout: Layout {
-                workspace_id: "w1".into(),
-                tab_id: "w1:t1".into(),
-                zoomed: false,
-                area: Rect {
-                    x: 30,
-                    y: 1,
-                    width: 100,
-                    height: 30,
-                },
-                focused_pane_id: "w1:p1".into(),
-                panes: vec![LayoutPane {
-                    pane_id: "w1:p1".into(),
-                    focused: true,
-                    rect: Rect {
-                        x: 30,
-                        y: 1,
-                        width: 100,
-                        height: 30,
-                    },
-                }],
-            },
-            panes: vec![PaneSnapshot {
-                pane_id: "w1:p1".into(),
-                viewport_rows: 30,
-                text: "deadbeef\n".into(),
-                ansi: "\u{1b}[33mdeadbeef\u{1b}[0m\n".into(),
-            }],
             text: "deadbeef\n".into(),
             ansi: "\u{1b}[33mdeadbeef\u{1b}[0m\n".into(),
             history_limited: false,
-            targets: vec![TabTarget {
+            targets: vec![Target {
                 text: "deadbeef".into(),
-                occurrences: vec![TargetOccurrence {
-                    pane_id: "w1:p1".into(),
-                    occurrence: Occurrence {
-                        row: 0,
-                        highlight_col: 0,
-                        highlight_width: 8,
-                        hint_col: 0,
-                        hint_width: 8,
-                    },
+                occurrences: vec![Occurrence {
+                    row: 0,
+                    highlight_col: 0,
+                    highlight_width: 8,
+                    hint_col: 0,
+                    hint_width: 8,
                 }],
             }],
-            hints: vec!["a".into()],
             alphabet: vec!['a', 's'],
         }
     }

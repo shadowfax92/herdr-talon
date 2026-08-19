@@ -4,47 +4,14 @@ use std::ffi::{OsStr, OsString};
 use std::process::{Command, Output};
 
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::config::PopupSize;
 use crate::PLUGIN_ID;
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct Rect {
-    pub x: u16,
-    pub y: u16,
-    pub width: u16,
-    pub height: u16,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct LayoutPane {
-    pub pane_id: String,
-    pub focused: bool,
-    pub rect: Rect,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct Layout {
-    pub workspace_id: String,
-    pub tab_id: String,
-    pub zoomed: bool,
-    pub area: Rect,
-    pub focused_pane_id: String,
-    pub panes: Vec<LayoutPane>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct PaneInfo {
-    pub pane_id: String,
-    pub cwd: Option<String>,
-    pub viewport_rows: u16,
-}
-
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct InvocationContext {
     pub focused_pane_id: Option<String>,
-    pub focused_pane_cwd: Option<String>,
 }
 
 impl InvocationContext {
@@ -89,29 +56,14 @@ impl Herdr {
         &self.binary
     }
 
-    pub fn layout(&self, pane_id: &str) -> Result<Layout> {
-        let response: LayoutEnvelope = self.json(["pane", "layout", "--pane", pane_id])?;
-        Ok(response.result.layout)
-    }
-
     pub fn client_width(&self, pane_id: &str) -> Result<u16> {
-        let layout = self.layout(pane_id)?;
-        Ok(layout.area.x.saturating_add(layout.area.width))
-    }
-
-    pub fn pane_info(&self, pane_id: &str) -> Result<PaneInfo> {
-        let response: PaneEnvelope = self.json(["pane", "get", pane_id])?;
-        let viewport_rows = response
+        let response: LayoutEnvelope = self.json(["pane", "layout", "--pane", pane_id])?;
+        Ok(response
             .result
-            .pane
-            .scroll
-            .map(|scroll| u16::try_from(scroll.viewport_rows).unwrap_or(u16::MAX))
-            .unwrap_or(0);
-        Ok(PaneInfo {
-            pane_id: response.result.pane.pane_id,
-            cwd: response.result.pane.cwd,
-            viewport_rows,
-        })
+            .layout
+            .area
+            .x
+            .saturating_add(response.result.layout.area.width))
     }
 
     pub fn read_visible(&self, pane_id: &str, ansi: bool) -> Result<String> {
@@ -214,16 +166,6 @@ impl Herdr {
         Ok(())
     }
 
-    pub fn send_text(&self, pane_id: &str, text: &str) -> Result<()> {
-        self.output([
-            OsStr::new("pane"),
-            OsStr::new("send-text"),
-            OsStr::new(pane_id),
-            OsStr::new(text),
-        ])?;
-        Ok(())
-    }
-
     pub fn reload_config(&self) -> Result<()> {
         self.output([OsStr::new("server"), OsStr::new("reload-config")])?;
         Ok(())
@@ -286,29 +228,18 @@ struct LayoutEnvelope {
 
 #[derive(Deserialize)]
 struct LayoutResult {
-    layout: Layout,
+    layout: ClientLayout,
 }
 
 #[derive(Deserialize)]
-struct PaneEnvelope {
-    result: PaneResult,
+struct ClientLayout {
+    area: ClientArea,
 }
 
 #[derive(Deserialize)]
-struct PaneResult {
-    pane: RawPaneInfo,
-}
-
-#[derive(Deserialize)]
-struct RawPaneInfo {
-    pane_id: String,
-    cwd: Option<String>,
-    scroll: Option<RawScroll>,
-}
-
-#[derive(Deserialize)]
-struct RawScroll {
-    viewport_rows: u64,
+struct ClientArea {
+    x: u16,
+    width: u16,
 }
 
 #[derive(Deserialize)]
@@ -364,7 +295,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(context.source_pane_id().unwrap(), "w2:p1");
-        assert_eq!(context.focused_pane_cwd.as_deref(), Some("/tmp/project"));
         assert!(InvocationContext::parse("{}")
             .unwrap()
             .source_pane_id()
