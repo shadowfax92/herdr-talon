@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 pub mod actions;
 pub mod app;
 pub mod config;
+pub mod document;
 pub mod herdr;
 pub mod hints;
 pub mod keybindings;
