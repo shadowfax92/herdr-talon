@@ -13,6 +13,28 @@ enabled_builtin_patterns = [
   "diff",
 ]
 
+[popup]
+width = "90%"
+height = "90%"
+
+[[profiles]]
+name = "laptop"
+max_client_width = 310
+width = "95%"
+height = "90%"
+
+[[profiles]]
+name = "partial-ultrawide"
+max_client_width = 350
+width = "90%"
+height = "90%"
+
+[[profiles]]
+name = "full-ultrawide"
+min_client_width = 400
+width = "70%"
+height = "90%"
+
 [[patterns]]
 name = "git-ssh"
 regex = 'git@[a-zA-Z0-9.-]+:[a-zA-Z0-9/.-]+\.git'

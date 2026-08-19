@@ -1,8 +1,8 @@
 [package]
 name = "herdr-talon"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Spatial keyboard hints for visible Herdr terminal targets"
+description = "Focused terminal history picker for Herdr"
 license = "MIT"
 
 [dependencies]

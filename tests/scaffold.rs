@@ -26,6 +26,11 @@ fn manifest_declares_the_complete_plugin_contract() {
     let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
 
     assert_eq!(manifest["id"].as_str(), Some("shadowfax.talon"));
+    assert_eq!(manifest["version"].as_str(), Some("0.2.0"));
+    assert_eq!(
+        manifest["description"].as_str(),
+        Some("Browse focused pane history and copy values with keyboard hints.")
+    );
     assert_eq!(manifest["min_herdr_version"].as_str(), Some("0.7.5"));
     assert_eq!(
         manifest["platforms"].as_array().unwrap()[0].as_str(),
