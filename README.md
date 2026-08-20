@@ -45,6 +45,12 @@ description = "Browse pane history with Talon"
 
 Existing config is preserved. Before changing it, Talon writes a sibling `config.toml.talon-backup-*` file. Repeating the installer is a byte-for-byte no-op; if another built-in or custom action owns `prefix+g`, Talon stops without replacing it.
 
+### Upgrading from 0.1
+
+Talon 0.2 replaces the in-pane overlay with a modal history popup. After upgrading, invoke `shadowfax.talon.install-keybindings` again so the managed binding matches the current plugin contract.
+
+`prefix+g` opens the popup; it does not toggle an open popup. Herdr sends every key to the active modal, so copy a value or close Talon with `q`, `Esc`, or `Ctrl-c` before invoking the shortcut again.
+
 ## Workflow
 
 Talon opens at the newest captured output. The footer always shows the active mode and its important controls.
@@ -184,15 +190,17 @@ The launch action records the frozen capture in a private one-shot handoff and o
 ```sh
 git clone https://github.com/shadowfax92/herdr-talon.git
 cd herdr-talon
-herdr plugin link .
+cargo build --release --locked
+herdr plugin link . --enabled
+herdr plugin action invoke shadowfax.talon.install-keybindings
 ```
 
 Run the complete local gate:
 
 ```sh
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test --locked
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets --all-features
 cargo build --release --locked
 ```
 
