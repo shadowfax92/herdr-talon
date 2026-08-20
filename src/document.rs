@@ -191,6 +191,19 @@ impl WrappedDocument {
         self.cell_offsets[position.row][position.column].saturating_sub(visual_row.start_cell)
     }
 
+    pub fn visual_cell_boundary_at_or_before(&self, visual_row: usize, column: usize) -> usize {
+        let visual = &self.visual_rows[visual_row.min(self.visual_rows.len().saturating_sub(1))];
+        let target = visual
+            .start_cell
+            .saturating_add(column.min(visual.end_cell.saturating_sub(visual.start_cell)));
+        let offsets =
+            &self.cell_offsets[visual.source_row][visual.start_column..=visual.end_column];
+        let boundary = offsets
+            .partition_point(|offset| *offset <= target)
+            .saturating_sub(1);
+        offsets[boundary].saturating_sub(visual.start_cell)
+    }
+
     pub fn position_at(&self, visual_row: usize, visual_column: usize) -> SourcePosition {
         let row = &self.visual_rows[visual_row.min(self.visual_rows.len().saturating_sub(1))];
         if row.start_column == row.end_column {
@@ -685,6 +698,14 @@ mod tests {
         );
         assert_eq!(document.position_at(0, 1), SourcePosition::new(0, 0));
         assert_eq!(document.position_at(1, 0), SourcePosition::new(0, 2));
+    }
+
+    #[test]
+    fn cell_boundaries_do_not_land_inside_wide_graphemes() {
+        let document = WrappedDocument::new("abc界x", "abc界x", 6);
+
+        assert_eq!(document.visual_cell_boundary_at_or_before(0, 4), 3);
+        assert_eq!(document.visual_cell_boundary_at_or_before(0, 5), 5);
     }
 
     #[test]

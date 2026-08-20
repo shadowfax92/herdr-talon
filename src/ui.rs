@@ -207,6 +207,9 @@ fn render_hints(buffer: &mut Buffer, area: Rect, state: &PickerState) {
                 hint.label.chars().count(),
                 usize::from(area.width),
             );
+            let badge_column = state
+                .document()
+                .visual_cell_boundary_at_or_before(anchor.row, badge_column);
             let x = area.x.saturating_add(saturating_u16(badge_column));
             let y = area
                 .y
@@ -381,7 +384,11 @@ fn hint_badge_column(anchor: usize, label_width: usize, viewport_width: usize) -
 mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use crate::{config::PatternDefinition, matcher::find_targets, snapshot::RunSnapshot};
+    use crate::{
+        config::PatternDefinition,
+        matcher::{find_targets, Occurrence, Target},
+        snapshot::RunSnapshot,
+    };
 
     use super::*;
 
@@ -466,5 +473,55 @@ mod tests {
     fn multi_key_hints_shift_left_at_the_right_edge() {
         assert_eq!(hint_badge_column(9, 2, 10), 8);
         assert_eq!(hint_badge_column(4, 2, 10), 4);
+    }
+
+    #[test]
+    fn right_clamped_hints_replace_wide_graphemes_from_their_leading_cell() {
+        let text = "abc界x";
+        let occurrence = |hint_col| Occurrence {
+            row: 0,
+            highlight_col: hint_col,
+            highlight_width: 1,
+            hint_col,
+            hint_width: 1,
+        };
+        let run = RunSnapshot {
+            source_pane_id: "w1:p1".into(),
+            text: text.into(),
+            ansi: text.into(),
+            targets: vec![
+                Target {
+                    text: "a".into(),
+                    occurrences: vec![occurrence(0)],
+                },
+                Target {
+                    text: "x".into(),
+                    occurrences: vec![occurrence(5)],
+                },
+                Target {
+                    text: "b".into(),
+                    occurrences: vec![occurrence(1)],
+                },
+            ],
+            alphabet: vec!['a', 's'],
+        };
+        let mut state = PickerState::new(&run).unwrap();
+        state.set_viewport(6, 1);
+        let label = state
+            .visible_hints()
+            .iter()
+            .find(|hint| hint.target_index == 1)
+            .unwrap()
+            .label
+            .clone();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 6, 1));
+
+        render_source(&mut buffer, Rect::new(0, 0, 6, 1), &state);
+
+        assert_eq!(label.chars().count(), 2);
+        for (column, character) in (3..).zip(label.chars()) {
+            assert_eq!(buffer[(column, 0)].symbol(), character.to_string());
+            assert_eq!(buffer[(column, 0)].bg, TARGET_COLOR);
+        }
     }
 }

@@ -163,7 +163,7 @@ width = "70%"
 height = "90%"
 ```
 
-Widths from 351 through 399 cells use the default. Popup dimensions can be percentages from 1% through 100% or positive cell counts.
+Widths from 351 through 399 cells use the default. Popup dimensions can be percentages from 1% through 100% or quoted positive cell counts such as `width = "120"`.
 
 ## How it works
 

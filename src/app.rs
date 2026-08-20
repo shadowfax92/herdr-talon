@@ -513,7 +513,6 @@ impl PickerState {
                 }
                 self.mode = Mode::Browse;
                 self.search_origin = None;
-                self.rebuild_search_matches(false);
                 self.error = None;
             }
             KeyCode::Backspace => {
@@ -556,19 +555,14 @@ impl PickerState {
         if preview {
             let origin = self.search_origin.unwrap_or(self.cursor);
             let origin_row = SourcePosition::new(origin.row, 0);
-            let index = self
-                .search_matches
-                .partition_point(|matched| matched.start < origin_row);
-            let next = self
-                .search_matches
-                .get(index)
-                .unwrap_or(&self.search_matches[0]);
-            self.cursor = next.start;
-            self.desired_column = self.document.visual_column_for(self.cursor);
-            let previous_top = self.top;
-            self.ensure_cursor_visible();
-            if self.top != previous_top {
-                self.refresh_hints();
+            if let Some(next) = next_search_match(self.document.lines(), query, origin_row, true) {
+                self.cursor = next.start;
+                self.desired_column = self.document.visual_column_for(self.cursor);
+                let previous_top = self.top;
+                self.ensure_cursor_visible();
+                if self.top != previous_top {
+                    self.refresh_hints();
+                }
             }
         }
     }
@@ -577,22 +571,37 @@ impl PickerState {
         if self.committed_search.is_empty() {
             return;
         }
-        self.rebuild_search_matches(false);
         if self.search_matches.is_empty() {
             return;
         }
-        let index = if forward {
-            self.search_matches
-                .partition_point(|matched| matched.start <= self.cursor)
-                % self.search_matches.len()
+        let next = if self.search_limited {
+            if forward {
+                next_search_match(
+                    self.document.lines(),
+                    &self.committed_search,
+                    self.cursor,
+                    false,
+                )
+            } else {
+                previous_search_match(self.document.lines(), &self.committed_search, self.cursor)
+            }
         } else {
-            self.search_matches
-                .partition_point(|matched| matched.start < self.cursor)
-                .checked_sub(1)
-                .unwrap_or(self.search_matches.len() - 1)
+            let index = if forward {
+                self.search_matches
+                    .partition_point(|matched| matched.start <= self.cursor)
+                    % self.search_matches.len()
+            } else {
+                self.search_matches
+                    .partition_point(|matched| matched.start < self.cursor)
+                    .checked_sub(1)
+                    .unwrap_or(self.search_matches.len() - 1)
+            };
+            self.search_matches.get(index).copied()
         };
-        self.cursor = self.search_matches[index].start;
-        self.after_motion(true);
+        if let Some(next) = next {
+            self.cursor = next.start;
+            self.after_motion(true);
+        }
     }
 
     fn handle_hint(&mut self, character: char) -> InputOutcome {
@@ -688,6 +697,107 @@ fn find_search_matches(lines: &[String], query: &str) -> SearchResults {
         }
     }
     SearchResults { matches, limited }
+}
+
+fn next_search_match(
+    lines: &[String],
+    query: &str,
+    from: SourcePosition,
+    inclusive: bool,
+) -> Option<SearchMatch> {
+    if query.is_empty() || lines.is_empty() {
+        return None;
+    }
+    let row = from.row.min(lines.len().saturating_sub(1));
+    let column = from.column.saturating_add(usize::from(!inclusive));
+    let minimum_byte = grapheme_byte(&lines[row], column);
+    if let Some(byte) = first_match_at_or_after(&lines[row], query, minimum_byte) {
+        return Some(search_match_at(lines, row, byte, query.len()));
+    }
+    for next_row in row.saturating_add(1)..lines.len() {
+        if let Some(byte) = first_match(&lines[next_row], query) {
+            return Some(search_match_at(lines, next_row, byte, query.len()));
+        }
+    }
+    for next_row in 0..row {
+        if let Some(byte) = first_match(&lines[next_row], query) {
+            return Some(search_match_at(lines, next_row, byte, query.len()));
+        }
+    }
+    first_match(&lines[row], query).map(|byte| search_match_at(lines, row, byte, query.len()))
+}
+
+fn previous_search_match(
+    lines: &[String],
+    query: &str,
+    from: SourcePosition,
+) -> Option<SearchMatch> {
+    if query.is_empty() || lines.is_empty() {
+        return None;
+    }
+    let row = from.row.min(lines.len().saturating_sub(1));
+    let maximum_byte = grapheme_byte(&lines[row], from.column);
+    if let Some(byte) = last_match_before(&lines[row], query, maximum_byte) {
+        return Some(search_match_at(lines, row, byte, query.len()));
+    }
+    for previous_row in (0..row).rev() {
+        if let Some(byte) = last_match(&lines[previous_row], query) {
+            return Some(search_match_at(lines, previous_row, byte, query.len()));
+        }
+    }
+    for previous_row in (row.saturating_add(1)..lines.len()).rev() {
+        if let Some(byte) = last_match(&lines[previous_row], query) {
+            return Some(search_match_at(lines, previous_row, byte, query.len()));
+        }
+    }
+    last_match(&lines[row], query).map(|byte| search_match_at(lines, row, byte, query.len()))
+}
+
+fn first_match(line: &str, query: &str) -> Option<usize> {
+    line.match_indices(query).next().map(|(byte, _)| byte)
+}
+
+fn first_match_at_or_after(line: &str, query: &str, minimum_byte: usize) -> Option<usize> {
+    line.match_indices(query)
+        .find(|(byte, _)| *byte >= minimum_byte)
+        .map(|(byte, _)| byte)
+}
+
+fn last_match(line: &str, query: &str) -> Option<usize> {
+    line.match_indices(query).last().map(|(byte, _)| byte)
+}
+
+fn last_match_before(line: &str, query: &str, maximum_byte: usize) -> Option<usize> {
+    line.match_indices(query)
+        .take_while(|(byte, _)| *byte < maximum_byte)
+        .last()
+        .map(|(byte, _)| byte)
+}
+
+fn grapheme_byte(line: &str, column: usize) -> usize {
+    line.grapheme_indices(true)
+        .nth(column)
+        .map(|(byte, _)| byte)
+        .unwrap_or(line.len())
+}
+
+fn search_match_at(lines: &[String], row: usize, byte: usize, byte_len: usize) -> SearchMatch {
+    let boundaries = lines[row]
+        .grapheme_indices(true)
+        .map(|(boundary, _)| boundary)
+        .collect::<Vec<_>>();
+    let start = boundaries
+        .partition_point(|boundary| *boundary <= byte)
+        .saturating_sub(1);
+    let end_byte = byte.saturating_add(byte_len);
+    let end = boundaries
+        .partition_point(|boundary| *boundary < end_byte)
+        .saturating_sub(1)
+        .max(start);
+    SearchMatch {
+        start: SourcePosition::new(row, start),
+        end: SourcePosition::new(row, end),
+    }
 }
 
 fn index_search_rows(line_count: usize, matches: &[SearchMatch]) -> Vec<Range<usize>> {
@@ -1009,6 +1119,26 @@ mod tests {
                 .len(),
             100
         );
+    }
+
+    #[test]
+    fn dense_search_navigation_reaches_matches_beyond_the_highlight_limit() {
+        let text = (0..600)
+            .map(|_| "x".repeat(100))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut state = PickerState::new(&snapshot(&text)).unwrap();
+        state.set_viewport(100, 2);
+        state.handle_key(key(KeyCode::Char('/')));
+        state.handle_key(key(KeyCode::Char('x')));
+
+        assert!(state.search_limited());
+        assert_eq!(state.cursor(), SourcePosition::new(599, 0));
+        state.handle_key(key(KeyCode::Enter));
+        state.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(state.cursor(), SourcePosition::new(599, 1));
+        state.handle_key(modified('N', KeyModifiers::SHIFT));
+        assert_eq!(state.cursor(), SourcePosition::new(599, 0));
     }
 
     #[test]
