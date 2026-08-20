@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::herdr::{ClosePluginPaneOutcome, Herdr, InvocationContext};
+use crate::herdr::{Herdr, InvocationContext};
 use crate::matcher::{find_targets, Target};
 
 pub const CAPTURE_ROWS: u32 = 1_000;
@@ -19,7 +19,6 @@ pub struct RunSnapshot {
     pub source_pane_id: String,
     pub text: String,
     pub ansi: String,
-    pub history_limited: bool,
     pub targets: Vec<Target>,
     pub alphabet: Vec<char>,
 }
@@ -27,13 +26,6 @@ pub struct RunSnapshot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LaunchOutcome {
     Opened { run_id: String },
-    Closed { pane_id: String },
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-struct ActivePicker {
-    run_id: String,
-    pane_id: String,
 }
 
 #[derive(Clone, Debug)]
@@ -127,60 +119,11 @@ impl RunStore {
         }
     }
 
-    pub fn set_active_picker(&self, run_id: &str, pane_id: &str) -> Result<()> {
-        self.path(run_id)?;
-        if pane_id.is_empty() || pane_id.chars().any(char::is_control) {
-            bail!("invalid Talon picker pane ID");
-        }
-        let active = ActivePicker {
-            run_id: run_id.to_string(),
-            pane_id: pane_id.to_string(),
-        };
-        let final_path = self.active_picker_path();
-        let temporary_path = self
-            .root
-            .join(format!(".active-picker.{}.tmp", std::process::id()));
-        let result: Result<()> = (|| {
-            let file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&temporary_path)?;
-            let mut writer = BufWriter::new(file);
-            serde_json::to_writer(&mut writer, &active)?;
-            writer.flush()?;
-            writer.get_ref().sync_all()?;
-            fs::rename(&temporary_path, &final_path)?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary_path);
-        }
-        result.context("failed to record active Talon picker")
-    }
-
-    pub fn clear_active_picker(&self, run_id: &str) -> Result<()> {
-        let Some(active) = self.active_picker()? else {
-            return Ok(());
-        };
-        if active.run_id != run_id {
-            return Ok(());
-        }
-        match fs::remove_file(self.active_picker_path()) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error).context("failed to clear active Talon picker"),
-        }
-    }
-
     pub fn reap_stale(&self, age: Duration) -> Result<usize> {
         let now = SystemTime::now();
         let mut removed = 0;
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
-            if entry.file_name() == ".active-picker.json" {
-                continue;
-            }
             let metadata = fs::symlink_metadata(entry.path())?;
             if metadata.file_type().is_symlink() || !metadata.is_file() {
                 continue;
@@ -205,29 +148,6 @@ impl RunStore {
         }
         Ok(self.root.join(format!("{run_id}.json")))
     }
-
-    fn active_picker(&self) -> Result<Option<ActivePicker>> {
-        let path = self.active_picker_path();
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error).context("failed to inspect active Talon picker"),
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            bail!("active Talon picker record is not a regular file");
-        }
-        let active: ActivePicker = serde_json::from_reader(BufReader::new(fs::File::open(path)?))
-            .context("failed to decode active Talon picker")?;
-        self.path(&active.run_id)?;
-        if active.pane_id.is_empty() || active.pane_id.chars().any(char::is_control) {
-            bail!("active Talon picker has an invalid pane ID");
-        }
-        Ok(Some(active))
-    }
-
-    fn active_picker_path(&self) -> PathBuf {
-        self.root.join(".active-picker.json")
-    }
 }
 
 pub fn launch(
@@ -236,54 +156,35 @@ pub fn launch(
     config: &Config,
     store: &RunStore,
 ) -> Result<LaunchOutcome> {
-    if let Some(active) = store.active_picker()? {
-        match herdr.close_plugin_pane(&active.pane_id)? {
-            ClosePluginPaneOutcome::Closed => {
-                store.clear_active_picker(&active.run_id)?;
-                return Ok(LaunchOutcome::Closed {
-                    pane_id: active.pane_id,
-                });
-            }
-            ClosePluginPaneOutcome::NotFound => {
-                store.clear_active_picker(&active.run_id)?;
-            }
-        }
-    }
     let source_pane_id = context.source_pane_id()?;
     let client_width = herdr.client_width(source_pane_id)?;
-    let (text, ansi, history_limited) = capture_history(herdr, source_pane_id)?;
+    let (text, ansi) = capture_history(herdr, source_pane_id)?;
     let targets = find_targets(&text, &config.patterns)?;
     let snapshot = RunSnapshot {
         source_pane_id: source_pane_id.to_string(),
         text,
         ansi,
-        history_limited,
         targets,
         alphabet: config.alphabet.clone(),
     };
     let run_id = store.write(&snapshot)?;
     let popup = config.popup(Some(client_width));
-    let pane_id = match herdr.open_picker(&run_id, &popup) {
-        Ok(pane_id) => pane_id,
+    match herdr.open_picker(&run_id, &popup) {
+        Ok(()) => {}
         Err(error) => {
             let _ = store.remove(&run_id);
             return Err(error);
         }
-    };
-    if let Err(error) = store.set_active_picker(&run_id, &pane_id) {
-        let _ = herdr.close_plugin_pane(&pane_id);
-        let _ = store.remove(&run_id);
-        return Err(error);
     }
     Ok(LaunchOutcome::Opened { run_id })
 }
 
-fn capture_history(herdr: &Herdr, pane_id: &str) -> Result<(String, String, bool)> {
+fn capture_history(herdr: &Herdr, pane_id: &str) -> Result<(String, String)> {
     let recent_text =
         normalize_newlines(herdr.read_recent_unwrapped(pane_id, false, CAPTURE_ROWS)?);
     let recent_ansi =
         normalize_newlines(herdr.read_recent_unwrapped(pane_id, true, CAPTURE_ROWS)?);
-    let (text, ansi) = if recent_text.trim().is_empty() {
+    let (text, ansi) = if recent_text.is_empty() {
         (
             normalize_newlines(herdr.read_visible(pane_id, false)?),
             normalize_newlines(herdr.read_visible(pane_id, true)?),
@@ -296,8 +197,7 @@ fn capture_history(herdr: &Herdr, pane_id: &str) -> Result<(String, String, bool
     } else {
         text.clone()
     };
-    let history_limited = row_count(&text) >= CAPTURE_ROWS as usize;
-    Ok((text, ansi, history_limited))
+    Ok((text, ansi))
 }
 
 fn normalize_newlines(text: String) -> String {
@@ -361,7 +261,6 @@ mod tests {
             source_pane_id: "w1:p1".into(),
             text: "deadbeef\n".into(),
             ansi: "\u{1b}[33mdeadbeef\u{1b}[0m\n".into(),
-            history_limited: false,
             targets: vec![Target {
                 text: "deadbeef".into(),
                 occurrences: vec![Occurrence {
@@ -436,22 +335,5 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), dir.path().join("runs")).unwrap();
 
         assert!(RunStore::new(dir.path()).is_err());
-    }
-
-    #[test]
-    fn active_picker_record_is_private_and_cleared_by_its_run() {
-        let dir = tempdir().unwrap();
-        let store = RunStore::new(dir.path()).unwrap();
-        let run_id = Uuid::new_v4().to_string();
-        let other_run_id = Uuid::new_v4().to_string();
-        let path = store.active_picker_path();
-
-        store.set_active_picker(&run_id, "w1:p3").unwrap();
-
-        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
-        store.clear_active_picker(&other_run_id).unwrap();
-        assert!(path.exists());
-        store.clear_active_picker(&run_id).unwrap();
-        assert!(!path.exists());
     }
 }

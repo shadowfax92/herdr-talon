@@ -12,7 +12,7 @@
 
 </div>
 
-Press `prefix+g` in any terminal pane. Talon freezes up to 1,000 recent lines from that pane and opens them in a centered native popup. Detected paths, URLs, hashes, IPs, and other useful values receive compact hints; type one to copy its value and close immediately.
+Press `prefix+g` in any terminal pane. Talon freezes up to 1,000 recent rendered terminal rows from that pane, unwraps soft wraps, and opens the result in a centered native popup. Detected paths, URLs, hashes, IPs, and other useful values receive compact hints; type one to copy its value and close immediately.
 
 The popup also works as a keyboard-driven history viewer when no value is detected:
 
@@ -108,7 +108,7 @@ Configuration is loaded on every launch, so edits do not require a Herdr reload.
 
 ### Hints and patterns
 
-The default hint alphabet is `asdfwerzxcuioptbm`. An alphabet must contain at least two unique lowercase ASCII letters and cannot contain the normal-mode keys `g`, `h`, `j`, `k`, `l`, `n`, `q`, `v`, or `y`.
+The default hint alphabet is `asdfwerzxcuioptbm`. An alphabet must contain at least two unique lowercase ASCII letters and cannot contain the normal-mode keys `g`, `h`, `j`, `k`, `l`, `n`, `q`, `v`, or `y`. Talon migrates the exact 0.1 default automatically; custom 0.1 alphabets must remove newly reserved keys before launch.
 
 `enabled_builtin_patterns` accepts:
 
@@ -169,11 +169,11 @@ Widths from 351 through 399 cells use the default. Popup dimensions can be perce
 
 Talon reads plain and ANSI `recent-unwrapped` output from the invoking pane. Plain text supplies stable match and selection coordinates; ANSI spans preserve terminal styling when the two representations align. A custom terminal-cell wrap table maps every visual row back to its logical source range, so resize, highlight, search, and selection all use one coordinate model.
 
-The launch action records the frozen capture in a private one-shot handoff and opens the picker as a focused Herdr popup. The picker claims and removes the handoff, writes successful completions through `pbcopy`, then exits so Herdr dismisses the popup. Pressing `prefix+g` while Talon is open closes the active picker.
+The launch action records the frozen capture in a private one-shot handoff and opens the picker as a focused Herdr popup. The picker claims and removes the handoff, writes successful completions through `pbcopy`, then exits so Herdr dismisses the popup. Herdr routes every key to an open modal popup, so close Talon with `q`, `Esc`, or `Ctrl-c`; a launch attempted while another modal is open fails safely without closing it.
 
 ## Limits
 
-- Herdr's public pane-read API caps the capture at 1,000 recent logical rows.
+- Herdr caps the capture at 1,000 recent rendered terminal rows before unwrapping soft wraps.
 - The snapshot is frozen; output produced after launch is intentionally absent.
 - Talon does not change the source pane's scroll or zoom state and does not reuse Herdr's native Copy mode.
 - Completion copies to the clipboard only. It does not paste, open, submit, or execute the selected text.

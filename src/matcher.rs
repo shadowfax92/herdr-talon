@@ -3,9 +3,8 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use unicode_width::UnicodeWidthStr;
 
-use crate::config::PatternDefinition;
+use crate::{cells, config::PatternDefinition};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Occurrence {
@@ -102,7 +101,7 @@ struct Candidate {
 }
 
 fn cell_width(text: &str) -> usize {
-    UnicodeWidthStr::width(text)
+    cells::width(text)
 }
 
 #[cfg(test)]
@@ -173,6 +172,13 @@ mod tests {
 
         assert_eq!(targets[0].occurrences[0].hint_col, 9);
         assert_eq!(targets[0].occurrences[0].hint_width, 6);
+    }
+
+    #[test]
+    fn coordinates_match_ratatui_halfwidth_sound_mark_cells() {
+        let targets = find_targets("ｶﾞ /tmp/a", &[pattern("path", r"/[^ ]+")]).unwrap();
+
+        assert_eq!(targets[0].occurrences[0].hint_col, 3);
     }
 
     #[test]

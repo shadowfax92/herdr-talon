@@ -12,25 +12,23 @@ use ratatui::{
 use crate::{
     app::{PickerMode, PickerState},
     document::{SelectionKind, VisualSegment},
-    snapshot::RunSnapshot,
 };
 
 const TARGET_COLOR: Color = Color::Rgb(218, 165, 70);
 
 pub struct TalonView<'a> {
-    snapshot: &'a RunSnapshot,
     state: &'a PickerState,
 }
 
 impl<'a> TalonView<'a> {
-    pub fn new(snapshot: &'a RunSnapshot, state: &'a PickerState) -> Self {
-        Self { snapshot, state }
+    pub fn new(state: &'a PickerState) -> Self {
+        Self { state }
     }
 }
 
 impl Widget for TalonView<'_> {
     fn render(self, area: Rect, buffer: &mut Buffer) {
-        render(area, buffer, self.snapshot, self.state);
+        render(area, buffer, self.state);
     }
 }
 
@@ -39,7 +37,7 @@ pub fn viewport_size(area: Rect) -> (u16, u16) {
     (regions.source.width.max(1), regions.source.height.max(1))
 }
 
-pub fn render(area: Rect, buffer: &mut Buffer, snapshot: &RunSnapshot, state: &PickerState) {
+pub fn render(area: Rect, buffer: &mut Buffer, state: &PickerState) {
     Clear.render(area, buffer);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -56,7 +54,7 @@ pub fn render(area: Rect, buffer: &mut Buffer, snapshot: &RunSnapshot, state: &P
 
     render_source(buffer, regions.source, state);
     render_scrollbar(buffer, regions.body, state);
-    render_footer(buffer, regions.footer, snapshot, state);
+    render_footer(buffer, regions.footer, state);
 }
 
 #[derive(Clone, Copy)]
@@ -108,6 +106,7 @@ fn render_targets(buffer: &mut Buffer, area: Rect, state: &PickerState) {
     let style = Style::default()
         .fg(TARGET_COLOR)
         .add_modifier(Modifier::UNDERLINED);
+    let visible_rows = state.top()..state.top().saturating_add(usize::from(area.height));
     for hint in state.visible_hints() {
         if !state.hint_is_active(&hint.label) {
             continue;
@@ -116,7 +115,10 @@ fn render_targets(buffer: &mut Buffer, area: Rect, state: &PickerState) {
             continue;
         };
         for occurrence in &target.occurrences {
-            for segment in state.document().occurrence_segments(occurrence) {
+            for segment in state
+                .document()
+                .occurrence_segments_in_visual_rows(occurrence, visible_rows.clone())
+            {
                 paint_segment(buffer, area, state.top(), segment, style);
             }
         }
@@ -127,13 +129,23 @@ fn render_search(buffer: &mut Buffer, area: Rect, state: &PickerState) {
     let style = Style::default()
         .fg(Color::Magenta)
         .add_modifier(Modifier::UNDERLINED | Modifier::BOLD);
-    for matched in state.search_matches() {
-        for segment in state.document().selection_segments(
-            matched.start,
-            matched.end,
-            SelectionKind::Character,
-        ) {
-            paint_segment(buffer, area, state.top(), segment, style);
+    for (visual_index, visual) in state
+        .document()
+        .visual_rows()
+        .iter()
+        .enumerate()
+        .skip(state.top())
+        .take(usize::from(area.height))
+    {
+        for matched in state.search_matches_in(visual.source_row(), visual.source_columns()) {
+            for segment in state.document().selection_segments_in_visual_rows(
+                matched.start,
+                matched.end,
+                SelectionKind::Character,
+                visual_index..visual_index.saturating_add(1),
+            ) {
+                paint_segment(buffer, area, state.top(), segment, style);
+            }
         }
     }
 }
@@ -146,7 +158,12 @@ fn render_selection(buffer: &mut Buffer, area: Rect, state: &PickerState) {
         .fg(Color::Black)
         .bg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
-    for segment in state.document().selection_segments(anchor, cursor, kind) {
+    for segment in state.document().selection_segments_in_visual_rows(
+        anchor,
+        cursor,
+        kind,
+        state.top()..state.top().saturating_add(usize::from(area.height)),
+    ) {
         paint_segment(buffer, area, state.top(), segment, style);
     }
 }
@@ -178,14 +195,13 @@ fn render_hints(buffer: &mut Buffer, area: Rect, state: &PickerState) {
             continue;
         };
         for occurrence in &target.occurrences {
-            let Some(anchor) = state.document().hint_anchor(occurrence) else {
+            let Some(anchor) = state.document().hint_anchor_in_viewport(
+                occurrence,
+                state.top(),
+                state.top().saturating_add(usize::from(area.height)),
+            ) else {
                 continue;
             };
-            if anchor.row < state.top()
-                || anchor.row >= state.top().saturating_add(usize::from(area.height))
-            {
-                continue;
-            }
             let badge_column = hint_badge_column(
                 anchor.column,
                 hint.label.chars().count(),
@@ -253,7 +269,7 @@ fn render_scrollbar(buffer: &mut Buffer, area: Rect, state: &PickerState) {
     scrollbar.render(area, buffer, &mut scrollbar_state);
 }
 
-fn render_footer(buffer: &mut Buffer, area: Rect, snapshot: &RunSnapshot, state: &PickerState) {
+fn render_footer(buffer: &mut Buffer, area: Rect, state: &PickerState) {
     if area.is_empty() {
         return;
     }
@@ -263,11 +279,6 @@ fn render_footer(buffer: &mut Buffer, area: Rect, snapshot: &RunSnapshot, state:
         PickerMode::VisualCharacter => (" VISUAL ", Color::Magenta),
         PickerMode::VisualLine => (" VISUAL LINE ", Color::Magenta),
         PickerMode::Search => (" SEARCH ", Color::Yellow),
-    };
-    let limited = if snapshot.history_limited {
-        " · last 1,000 lines"
-    } else {
-        ""
     };
     let status = Line::from(vec![
         Span::styled(
@@ -279,14 +290,13 @@ fn render_footer(buffer: &mut Buffer, area: Rect, snapshot: &RunSnapshot, state:
         ),
         Span::styled(
             format!(
-                " {position}/{total} · {} visible target{}{} ",
+                " {position}/{total} · {} visible target{} · up to 1,000 terminal rows ",
                 state.visible_hints().len(),
                 if state.visible_hints().len() == 1 {
                     ""
                 } else {
                     "s"
-                },
-                limited
+                }
             ),
             Style::default().fg(Color::Gray),
         ),
@@ -329,8 +339,9 @@ fn render_footer(buffer: &mut Buffer, area: Rect, snapshot: &RunSnapshot, state:
     } else if state.mode() == PickerMode::Search {
         (
             format!(
-                " {} match{} ",
+                " {}{} match{} ",
                 state.search_matches().len(),
+                if state.search_limited() { "+" } else { "" },
                 if state.search_matches().len() == 1 {
                     ""
                 } else {
@@ -370,11 +381,11 @@ fn hint_badge_column(anchor: usize, label_width: usize, viewport_width: usize) -
 mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use crate::{config::PatternDefinition, matcher::find_targets};
+    use crate::{config::PatternDefinition, matcher::find_targets, snapshot::RunSnapshot};
 
     use super::*;
 
-    fn snapshot(history_limited: bool) -> RunSnapshot {
+    fn snapshot() -> RunSnapshot {
         let text = "red TKT-1000\nplain second line\nneedle TKT-2000";
         let patterns = vec![PatternDefinition {
             name: "ticket".into(),
@@ -384,7 +395,6 @@ mod tests {
             source_pane_id: "w1:p1".into(),
             text: text.into(),
             ansi: "\u{1b}[31mred\u{1b}[0m TKT-1000\nplain second line\nneedle TKT-2000".into(),
-            history_limited,
             targets: find_targets(text, &patterns).unwrap(),
             alphabet: vec!['a', 's', 'd'],
         }
@@ -403,20 +413,20 @@ mod tests {
 
     #[test]
     fn renders_styled_history_hints_scrollbar_and_clear_instructions() {
-        let snapshot = snapshot(true);
+        let snapshot = snapshot();
         let area = Rect::new(0, 0, 80, 12);
         let mut state = PickerState::new(&snapshot).unwrap();
         let (width, height) = viewport_size(area);
         state.set_viewport(width, height);
         let mut buffer = Buffer::empty(area);
 
-        render(area, &mut buffer, &snapshot, &state);
+        render(area, &mut buffer, &state);
 
         let text = buffer_text(&buffer);
         assert!(text.contains("Talon · focused pane history"));
         assert!(text.contains("type hint → copy & close"));
         assert!(text.contains("n/N next/previous"));
-        assert!(text.contains("last 1,000 lines"));
+        assert!(text.contains("up to 1,000 terminal rows"));
         assert!(buffer.content.iter().any(|cell| cell.fg == Color::Red));
         assert!(buffer
             .content
@@ -426,7 +436,7 @@ mod tests {
 
     #[test]
     fn visual_and_search_modes_have_distinct_feedback() {
-        let snapshot = snapshot(false);
+        let snapshot = snapshot();
         let area = Rect::new(0, 0, 72, 12);
         let mut state = PickerState::new(&snapshot).unwrap();
         let (width, height) = viewport_size(area);
@@ -436,7 +446,7 @@ mod tests {
         state.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
         let mut buffer = Buffer::empty(area);
 
-        render(area, &mut buffer, &snapshot, &state);
+        render(area, &mut buffer, &state);
 
         assert!(buffer_text(&buffer).contains("y copy & close"));
         assert!(buffer.content.iter().any(|cell| cell.bg == Color::Cyan));
@@ -446,7 +456,7 @@ mod tests {
         for character in "needle".chars() {
             state.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
         }
-        render(area, &mut buffer, &snapshot, &state);
+        render(area, &mut buffer, &state);
 
         assert!(buffer_text(&buffer).contains("/needle█"));
         assert!(buffer.content.iter().any(|cell| cell.fg == Color::Magenta));

@@ -224,7 +224,9 @@ fn validate_alphabet(alphabet: &[char]) -> Result<()> {
         .filter(|key| RESERVED_HINT_KEYS.contains(*key))
         .collect::<String>();
     if !conflicts.is_empty() {
-        bail!("alphabet contains reserved normal-mode keys: {conflicts}");
+        bail!(
+            "alphabet contains reserved normal-mode keys: {conflicts}; remove them or use the default '{DEFAULT_ALPHABET}'"
+        );
     }
     Ok(())
 }
@@ -384,6 +386,7 @@ regex = "("
 
         assert!(error.contains("reserved"));
         assert!(error.contains('j'));
+        assert!(error.contains(DEFAULT_ALPHABET));
     }
 
     #[test]

@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use anyhow::Result;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use unicode_segmentation::UnicodeSegmentation;
@@ -8,6 +10,8 @@ use crate::{
     matcher::Target,
     snapshot::RunSnapshot,
 };
+
+const MAX_SEARCH_MATCHES: usize = 50_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Completion {
@@ -68,14 +72,17 @@ pub struct PickerState {
     search_input: String,
     search_origin: Option<SourcePosition>,
     search_matches: Vec<SearchMatch>,
+    search_row_ranges: Vec<Range<usize>>,
+    search_limited: bool,
     error: Option<String>,
 }
 
 impl PickerState {
     pub fn new(snapshot: &RunSnapshot) -> Result<Self> {
         generate_hints(&snapshot.alphabet, 1)?;
-        let document = WrappedDocument::new(&snapshot.text, &snapshot.ansi, 1);
-        let cursor = document.last_line_start();
+        let document = WrappedDocument::deferred(&snapshot.text, &snapshot.ansi);
+        let cursor = document.last_position();
+        let line_count = document.lines().len();
         Ok(Self {
             document,
             targets: snapshot.targets.clone(),
@@ -92,6 +99,8 @@ impl PickerState {
             search_input: String::new(),
             search_origin: None,
             search_matches: Vec::new(),
+            search_row_ranges: vec![0..0; line_count],
+            search_limited: false,
             error: None,
         })
     }
@@ -112,7 +121,7 @@ impl PickerState {
             }
             self.ensure_cursor_visible();
         } else {
-            self.cursor = self.document.last_line_start();
+            self.cursor = self.document.last_position();
             self.top = self
                 .document
                 .visual_rows()
@@ -295,6 +304,20 @@ impl PickerState {
         &self.search_matches
     }
 
+    pub fn search_matches_in(&self, row: usize, columns: Range<usize>) -> &[SearchMatch] {
+        let Some(row_range) = self.search_row_ranges.get(row) else {
+            return &[];
+        };
+        let matches = &self.search_matches[row_range.clone()];
+        let start = matches.partition_point(|matched| matched.end.column < columns.start);
+        let end = matches.partition_point(|matched| matched.start.column < columns.end);
+        &matches[start.min(end)..end]
+    }
+
+    pub fn search_limited(&self) -> bool {
+        self.search_limited
+    }
+
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
@@ -332,7 +355,7 @@ impl PickerState {
             KeyCode::Char('G') | KeyCode::Char('g')
                 if key.modifiers.contains(KeyModifiers::SHIFT) =>
             {
-                self.move_to(self.document.last_line_start())
+                self.move_to(self.document.last_position())
             }
             _ => return false,
         }
@@ -464,6 +487,8 @@ impl PickerState {
         self.search_origin = Some(self.cursor);
         self.search_input.clear();
         self.search_matches.clear();
+        self.search_row_ranges.fill(0..0);
+        self.search_limited = false;
         self.hint_input.clear();
         self.error = None;
     }
@@ -480,6 +505,9 @@ impl PickerState {
                 self.after_motion(true);
             }
             KeyCode::Enter => {
+                if !self.search_input.is_empty() && self.search_matches.is_empty() {
+                    return InputOutcome::Continue;
+                }
                 if !self.search_input.is_empty() {
                     self.committed_search.clone_from(&self.search_input);
                 }
@@ -511,7 +539,11 @@ impl PickerState {
         } else {
             self.committed_search.as_str()
         };
-        self.search_matches = find_search_matches(self.document.lines(), query);
+        let results = find_search_matches(self.document.lines(), query);
+        self.search_matches = results.matches;
+        self.search_limited = results.limited;
+        self.search_row_ranges =
+            index_search_rows(self.document.lines().len(), &self.search_matches);
         if query.is_empty() {
             self.error = None;
             return;
@@ -523,10 +555,13 @@ impl PickerState {
         self.error = None;
         if preview {
             let origin = self.search_origin.unwrap_or(self.cursor);
+            let origin_row = SourcePosition::new(origin.row, 0);
+            let index = self
+                .search_matches
+                .partition_point(|matched| matched.start < origin_row);
             let next = self
                 .search_matches
-                .iter()
-                .find(|matched| matched.start.row >= origin.row)
+                .get(index)
                 .unwrap_or(&self.search_matches[0]);
             self.cursor = next.start;
             self.desired_column = self.document.visual_column_for(self.cursor);
@@ -546,34 +581,15 @@ impl PickerState {
         if self.search_matches.is_empty() {
             return;
         }
-        let current = self
-            .search_matches
-            .iter()
-            .position(|matched| matched.start == self.cursor);
         let index = if forward {
-            current.map_or_else(
-                || {
-                    self.search_matches
-                        .iter()
-                        .position(|matched| matched.start > self.cursor)
-                        .unwrap_or(0)
-                },
-                |index| (index + 1) % self.search_matches.len(),
-            )
+            self.search_matches
+                .partition_point(|matched| matched.start <= self.cursor)
+                % self.search_matches.len()
         } else {
-            current.map_or_else(
-                || {
-                    self.search_matches
-                        .iter()
-                        .rposition(|matched| matched.start < self.cursor)
-                        .unwrap_or(self.search_matches.len() - 1)
-                },
-                |index| {
-                    index
-                        .checked_sub(1)
-                        .unwrap_or(self.search_matches.len() - 1)
-                },
-            )
+            self.search_matches
+                .partition_point(|matched| matched.start < self.cursor)
+                .checked_sub(1)
+                .unwrap_or(self.search_matches.len() - 1)
         };
         self.cursor = self.search_matches[index].start;
         self.after_motion(true);
@@ -613,8 +629,11 @@ impl PickerState {
                 target
                     .occurrences
                     .iter()
-                    .filter_map(|occurrence| self.document.hint_anchor(occurrence))
-                    .any(|anchor| anchor.row >= self.top && anchor.row < bottom)
+                    .any(|occurrence| {
+                        self.document
+                            .hint_anchor_in_viewport(occurrence, self.top, bottom)
+                            .is_some()
+                    })
                     .then_some(index)
             })
             .collect::<Vec<_>>();
@@ -630,34 +649,58 @@ impl PickerState {
     }
 }
 
-fn find_search_matches(lines: &[String], query: &str) -> Vec<SearchMatch> {
+struct SearchResults {
+    matches: Vec<SearchMatch>,
+    limited: bool,
+}
+
+fn find_search_matches(lines: &[String], query: &str) -> SearchResults {
     if query.is_empty() {
-        return Vec::new();
+        return SearchResults {
+            matches: Vec::new(),
+            limited: false,
+        };
     }
-    lines
-        .iter()
-        .enumerate()
-        .flat_map(|(row, line)| {
-            let boundaries = line
-                .grapheme_indices(true)
-                .map(|(byte, _)| byte)
-                .collect::<Vec<_>>();
-            line.match_indices(query).map(move |(byte, matched)| {
-                let start = boundaries
-                    .partition_point(|boundary| *boundary <= byte)
-                    .saturating_sub(1);
-                let end_byte = byte.saturating_add(matched.len());
-                let end = boundaries
-                    .partition_point(|boundary| *boundary < end_byte)
-                    .saturating_sub(1)
-                    .max(start);
-                SearchMatch {
-                    start: SourcePosition::new(row, start),
-                    end: SourcePosition::new(row, end),
-                }
-            })
-        })
-        .collect()
+    let mut matches = Vec::new();
+    let mut limited = false;
+    'lines: for (row, line) in lines.iter().enumerate() {
+        let boundaries = line
+            .grapheme_indices(true)
+            .map(|(byte, _)| byte)
+            .collect::<Vec<_>>();
+        for (byte, matched) in line.match_indices(query) {
+            if matches.len() == MAX_SEARCH_MATCHES {
+                limited = true;
+                break 'lines;
+            }
+            let start = boundaries
+                .partition_point(|boundary| *boundary <= byte)
+                .saturating_sub(1);
+            let end_byte = byte.saturating_add(matched.len());
+            let end = boundaries
+                .partition_point(|boundary| *boundary < end_byte)
+                .saturating_sub(1)
+                .max(start);
+            matches.push(SearchMatch {
+                start: SourcePosition::new(row, start),
+                end: SourcePosition::new(row, end),
+            });
+        }
+    }
+    SearchResults { matches, limited }
+}
+
+fn index_search_rows(line_count: usize, matches: &[SearchMatch]) -> Vec<Range<usize>> {
+    let mut ranges = vec![0..0; line_count];
+    let mut index = 0;
+    for (row, range) in ranges.iter_mut().enumerate() {
+        let start = index;
+        while index < matches.len() && matches[index].start.row == row {
+            index += 1;
+        }
+        *range = start..index;
+    }
+    ranges
 }
 
 #[cfg(test)]
@@ -685,7 +728,6 @@ mod tests {
             source_pane_id: "w1:p1".into(),
             text: text.into(),
             ansi: text.into(),
-            history_limited: false,
             targets: find_targets(text, &patterns).unwrap(),
             alphabet: vec!['a', 's', 'd'],
         }
@@ -702,7 +744,7 @@ mod tests {
 
         assert_eq!(state.top(), 7);
         assert_eq!(state.cursor().row, 9);
-        assert_eq!(state.cursor().column, 0);
+        assert_eq!(state.cursor().column, 5);
 
         state.handle_key(key(KeyCode::Char('k')));
         assert_eq!(state.cursor().row, 8);
@@ -838,6 +880,53 @@ mod tests {
     }
 
     #[test]
+    fn newest_cursor_is_visible_when_the_final_logical_line_wraps() {
+        let mut state = PickerState::new(&snapshot("older\nabcdefghij")).unwrap();
+        state.set_viewport(3, 2);
+        let visual_row = state.document().visual_row_for(state.cursor());
+
+        assert_eq!(state.cursor(), SourcePosition::new(1, 9));
+        assert!(visual_row >= state.top());
+        assert!(visual_row < state.top() + state.viewport_height());
+
+        state.handle_key(key(KeyCode::Char('g')));
+        state.handle_key(modified('G', KeyModifiers::SHIFT));
+        assert_eq!(state.cursor(), SourcePosition::new(1, 9));
+    }
+
+    #[test]
+    fn document_wrapping_is_deferred_until_the_viewport_is_known() {
+        let text = "x".repeat(100_000);
+        let mut state = PickerState::new(&snapshot(&text)).unwrap();
+
+        assert!(state.document().visual_rows().is_empty());
+        state.set_viewport(100, 20);
+        assert_eq!(state.document().visual_rows().len(), 1_000);
+    }
+
+    #[test]
+    fn a_wrapped_target_keeps_its_hint_when_its_start_scrolls_above_view() {
+        let text = "/abcdefghij";
+        let patterns = vec![PatternDefinition {
+            name: "path".into(),
+            regex: r"/[a-z]+".into(),
+        }];
+        let run = RunSnapshot {
+            source_pane_id: "w1:p1".into(),
+            text: text.into(),
+            ansi: text.into(),
+            targets: find_targets(text, &patterns).unwrap(),
+            alphabet: vec!['a', 's'],
+        };
+        let mut state = PickerState::new(&run).unwrap();
+
+        state.set_viewport(4, 1);
+
+        assert_eq!(state.visible_hints().len(), 1);
+        assert_eq!(state.visible_hints()[0].target_index, 0);
+    }
+
+    #[test]
     fn modified_hint_keys_do_not_copy_or_change_the_prefix() {
         for modifiers in [
             KeyModifiers::CONTROL,
@@ -886,6 +975,40 @@ mod tests {
         }
 
         assert_eq!(state.cursor(), SourcePosition::new(0, 2));
+    }
+
+    #[test]
+    fn enter_keeps_a_zero_match_search_open_with_its_error() {
+        let mut state = PickerState::new(&snapshot("haystack")).unwrap();
+        state.set_viewport(20, 2);
+        state.handle_key(key(KeyCode::Char('/')));
+        for character in "needle".chars() {
+            state.handle_key(key(KeyCode::Char(character)));
+        }
+
+        state.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(state.mode(), PickerMode::Search);
+        assert!(state.error().unwrap().contains("No matches"));
+    }
+
+    #[test]
+    fn dense_searches_are_bounded_and_indexed_by_visible_source_range() {
+        let text = "x".repeat(MAX_SEARCH_MATCHES + 100);
+        let mut state = PickerState::new(&snapshot(&text)).unwrap();
+        state.set_viewport(100, 2);
+        state.handle_key(key(KeyCode::Char('/')));
+        state.handle_key(key(KeyCode::Char('x')));
+        let visual = &state.document().visual_rows()[state.top()];
+
+        assert_eq!(state.search_matches().len(), MAX_SEARCH_MATCHES);
+        assert!(state.search_limited());
+        assert_eq!(
+            state
+                .search_matches_in(visual.source_row(), visual.source_columns())
+                .len(),
+            100
+        );
     }
 
     #[test]

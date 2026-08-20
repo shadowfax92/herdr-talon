@@ -35,15 +35,11 @@ pub struct Herdr {
     binary: PathBuf,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ClosePluginPaneOutcome {
-    Closed,
-    NotFound,
-}
-
 impl Herdr {
     pub fn from_environment() -> Self {
-        Self::new(runtime_binary(std::env::var_os("HERDR_BIN_PATH")))
+        Self {
+            binary: runtime_binary(std::env::var_os("HERDR_BIN_PATH")).into(),
+        }
     }
 
     pub fn new(binary: impl Into<PathBuf>) -> Self {
@@ -99,9 +95,9 @@ impl Herdr {
         String::from_utf8(output).context("Herdr pane read returned non-UTF-8 output")
     }
 
-    pub fn open_picker(&self, run_id: &str, popup: &PopupSize) -> Result<String> {
+    pub fn open_picker(&self, run_id: &str, popup: &PopupSize) -> Result<()> {
         let environment = format!("HERDR_TALON_RUN_ID={run_id}");
-        let response: PluginPaneOpenEnvelope = self.json([
+        let response: OkEnvelope = self.json([
             OsStr::new("plugin"),
             OsStr::new("pane"),
             OsStr::new("open"),
@@ -119,39 +115,10 @@ impl Herdr {
             OsStr::new(&environment),
             OsStr::new("--focus"),
         ])?;
-        let pane_id = response.result.plugin_pane.pane.pane_id;
-        if pane_id.is_empty() || pane_id.chars().any(char::is_control) {
-            bail!("Herdr returned an invalid picker pane ID");
+        if response.result.kind != "ok" {
+            bail!("Herdr returned an unexpected popup response");
         }
-        Ok(pane_id)
-    }
-
-    pub fn close_plugin_pane(&self, pane_id: &str) -> Result<ClosePluginPaneOutcome> {
-        let output = self.command([
-            OsStr::new("plugin"),
-            OsStr::new("pane"),
-            OsStr::new("close"),
-            OsStr::new(pane_id),
-        ])?;
-        if output.status.success() {
-            let response: PluginPaneCloseEnvelope = serde_json::from_slice(&output.stdout)
-                .context("failed to decode Herdr plugin pane close response")?;
-            if response.result.pane_id != pane_id {
-                bail!("Herdr closed an unexpected plugin pane");
-            }
-            return Ok(ClosePluginPaneOutcome::Closed);
-        }
-        if serde_json::from_slice::<ErrorEnvelope>(&output.stderr)
-            .is_ok_and(|response| response.error.code == "plugin_pane_not_found")
-        {
-            return Ok(ClosePluginPaneOutcome::NotFound);
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "Herdr command failed with {}: {}",
-            output.status,
-            stderr.trim()
-        );
+        Ok(())
     }
 
     pub fn notify(&self, body: &str) -> Result<()> {
@@ -243,43 +210,14 @@ struct ClientArea {
 }
 
 #[derive(Deserialize)]
-struct PluginPaneOpenEnvelope {
-    result: PluginPaneOpenResult,
+struct OkEnvelope {
+    result: OkResult,
 }
 
 #[derive(Deserialize)]
-struct PluginPaneOpenResult {
-    plugin_pane: RawPluginPane,
-}
-
-#[derive(Deserialize)]
-struct RawPluginPane {
-    pane: RawPluginPaneInfo,
-}
-
-#[derive(Deserialize)]
-struct RawPluginPaneInfo {
-    pane_id: String,
-}
-
-#[derive(Deserialize)]
-struct PluginPaneCloseEnvelope {
-    result: PluginPaneCloseResult,
-}
-
-#[derive(Deserialize)]
-struct PluginPaneCloseResult {
-    pane_id: String,
-}
-
-#[derive(Deserialize)]
-struct ErrorEnvelope {
-    error: ErrorBody,
-}
-
-#[derive(Deserialize)]
-struct ErrorBody {
-    code: String,
+struct OkResult {
+    #[serde(rename = "type")]
+    kind: String,
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 
 pub mod actions;
 pub mod app;
+mod cells;
 pub mod config;
 pub mod document;
 pub mod herdr;
