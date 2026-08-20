@@ -12,7 +12,7 @@ use crate::herdr::Herdr;
 
 const KEY: &str = "prefix+g";
 const COMMAND: &str = "shadowfax.talon.launch";
-const DESCRIPTION: &str = "Select visible target with Talon";
+const DESCRIPTION: &str = "Browse pane history with Talon";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InstallOutcome {

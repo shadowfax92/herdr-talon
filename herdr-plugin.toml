@@ -1,7 +1,7 @@
 id = "shadowfax.talon"
 name = "Talon"
-version = "0.1.0"
-description = "Select visible terminal targets with spatial keyboard hints."
+version = "0.2.0"
+description = "Browse focused pane history and copy values with keyboard hints."
 min_herdr_version = "0.7.5"
 platforms = ["macos"]
 
@@ -11,7 +11,7 @@ command = ["cargo", "build", "--release", "--locked"]
 [[actions]]
 id = "launch"
 title = "Open Talon"
-description = "Select a visible target anywhere in the focused tab."
+description = "Browse recent focused-pane output and copy a target or selection."
 contexts = ["pane"]
 command = ["./target/release/herdr-talon", "launch"]
 
@@ -24,5 +24,7 @@ command = ["./target/release/herdr-talon", "install-keybindings"]
 [[panes]]
 id = "picker"
 title = "Talon"
-placement = "overlay"
+placement = "popup"
+width = "90%"
+height = "90%"
 command = ["./target/release/herdr-talon", "picker"]

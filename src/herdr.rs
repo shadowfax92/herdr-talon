@@ -4,46 +4,14 @@ use std::ffi::{OsStr, OsString};
 use std::process::{Command, Output};
 
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
+use crate::config::PopupSize;
 use crate::PLUGIN_ID;
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct Rect {
-    pub x: u16,
-    pub y: u16,
-    pub width: u16,
-    pub height: u16,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct LayoutPane {
-    pub pane_id: String,
-    pub focused: bool,
-    pub rect: Rect,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct Layout {
-    pub workspace_id: String,
-    pub tab_id: String,
-    pub zoomed: bool,
-    pub area: Rect,
-    pub focused_pane_id: String,
-    pub panes: Vec<LayoutPane>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct PaneInfo {
-    pub pane_id: String,
-    pub cwd: Option<String>,
-    pub viewport_rows: u16,
-}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct InvocationContext {
     pub focused_pane_id: Option<String>,
-    pub focused_pane_cwd: Option<String>,
 }
 
 impl InvocationContext {
@@ -67,15 +35,11 @@ pub struct Herdr {
     binary: PathBuf,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ClosePluginPaneOutcome {
-    Closed,
-    NotFound,
-}
-
 impl Herdr {
     pub fn from_environment() -> Self {
-        Self::new(runtime_binary(std::env::var_os("HERDR_BIN_PATH")))
+        Self {
+            binary: runtime_binary(std::env::var_os("HERDR_BIN_PATH")).into(),
+        }
     }
 
     pub fn new(binary: impl Into<PathBuf>) -> Self {
@@ -88,43 +52,52 @@ impl Herdr {
         &self.binary
     }
 
-    pub fn layout(&self, pane_id: &str) -> Result<Layout> {
+    pub fn client_width(&self, pane_id: &str) -> Result<u16> {
         let response: LayoutEnvelope = self.json(["pane", "layout", "--pane", pane_id])?;
-        Ok(response.result.layout)
-    }
-
-    pub fn pane_info(&self, pane_id: &str) -> Result<PaneInfo> {
-        let response: PaneEnvelope = self.json(["pane", "get", pane_id])?;
-        let viewport_rows = response
+        Ok(response
             .result
-            .pane
-            .scroll
-            .map(|scroll| u16::try_from(scroll.viewport_rows).unwrap_or(u16::MAX))
-            .unwrap_or(0);
-        Ok(PaneInfo {
-            pane_id: response.result.pane.pane_id,
-            cwd: response.result.pane.cwd,
-            viewport_rows,
-        })
+            .layout
+            .area
+            .x
+            .saturating_add(response.result.layout.area.width))
     }
 
     pub fn read_visible(&self, pane_id: &str, ansi: bool) -> Result<String> {
+        self.read_pane(pane_id, "visible", ansi, None)
+    }
+
+    pub fn read_recent_unwrapped(&self, pane_id: &str, ansi: bool, lines: u32) -> Result<String> {
+        self.read_pane(pane_id, "recent-unwrapped", ansi, Some(lines))
+    }
+
+    fn read_pane(
+        &self,
+        pane_id: &str,
+        source: &str,
+        ansi: bool,
+        lines: Option<u32>,
+    ) -> Result<String> {
         let format = if ansi { "ansi" } else { "text" };
-        let output = self.output([
-            OsStr::new("pane"),
-            OsStr::new("read"),
-            OsStr::new(pane_id),
-            OsStr::new("--source"),
-            OsStr::new("visible"),
-            OsStr::new("--format"),
-            OsStr::new(format),
-        ])?;
+        let mut args = vec![
+            OsString::from("pane"),
+            OsString::from("read"),
+            OsString::from(pane_id),
+            OsString::from("--source"),
+            OsString::from(source),
+        ];
+        if let Some(lines) = lines {
+            args.push(OsString::from("--lines"));
+            args.push(OsString::from(lines.to_string()));
+        }
+        args.push(OsString::from("--format"));
+        args.push(OsString::from(format));
+        let output = self.output(args)?;
         String::from_utf8(output).context("Herdr pane read returned non-UTF-8 output")
     }
 
-    pub fn open_picker(&self, run_id: &str) -> Result<String> {
+    pub fn open_picker(&self, run_id: &str, popup: &PopupSize) -> Result<()> {
         let environment = format!("HERDR_TALON_RUN_ID={run_id}");
-        let response: PluginPaneOpenEnvelope = self.json([
+        let response: OkEnvelope = self.json([
             OsStr::new("plugin"),
             OsStr::new("pane"),
             OsStr::new("open"),
@@ -133,43 +106,19 @@ impl Herdr {
             OsStr::new("--entrypoint"),
             OsStr::new("picker"),
             OsStr::new("--placement"),
-            OsStr::new("overlay"),
+            OsStr::new("popup"),
+            OsStr::new("--width"),
+            OsStr::new(&popup.width),
+            OsStr::new("--height"),
+            OsStr::new(&popup.height),
             OsStr::new("--env"),
             OsStr::new(&environment),
+            OsStr::new("--focus"),
         ])?;
-        let pane_id = response.result.plugin_pane.pane.pane_id;
-        if pane_id.is_empty() || pane_id.chars().any(char::is_control) {
-            bail!("Herdr returned an invalid picker pane ID");
+        if response.result.kind != "ok" {
+            bail!("Herdr returned an unexpected popup response");
         }
-        Ok(pane_id)
-    }
-
-    pub fn close_plugin_pane(&self, pane_id: &str) -> Result<ClosePluginPaneOutcome> {
-        let output = self.command([
-            OsStr::new("plugin"),
-            OsStr::new("pane"),
-            OsStr::new("close"),
-            OsStr::new(pane_id),
-        ])?;
-        if output.status.success() {
-            let response: PluginPaneCloseEnvelope = serde_json::from_slice(&output.stdout)
-                .context("failed to decode Herdr plugin pane close response")?;
-            if response.result.pane_id != pane_id {
-                bail!("Herdr closed an unexpected plugin pane");
-            }
-            return Ok(ClosePluginPaneOutcome::Closed);
-        }
-        if serde_json::from_slice::<ErrorEnvelope>(&output.stderr)
-            .is_ok_and(|response| response.error.code == "plugin_pane_not_found")
-        {
-            return Ok(ClosePluginPaneOutcome::NotFound);
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "Herdr command failed with {}: {}",
-            output.status,
-            stderr.trim()
-        );
+        Ok(())
     }
 
     pub fn notify(&self, body: &str) -> Result<()> {
@@ -180,16 +129,6 @@ impl Herdr {
             OsStr::new("Talon"),
             OsStr::new("--body"),
             OsStr::new(&body),
-        ])?;
-        Ok(())
-    }
-
-    pub fn send_text(&self, pane_id: &str, text: &str) -> Result<()> {
-        self.output([
-            OsStr::new("pane"),
-            OsStr::new("send-text"),
-            OsStr::new(pane_id),
-            OsStr::new(text),
         ])?;
         Ok(())
     }
@@ -256,69 +195,29 @@ struct LayoutEnvelope {
 
 #[derive(Deserialize)]
 struct LayoutResult {
-    layout: Layout,
+    layout: ClientLayout,
 }
 
 #[derive(Deserialize)]
-struct PaneEnvelope {
-    result: PaneResult,
+struct ClientLayout {
+    area: ClientArea,
 }
 
 #[derive(Deserialize)]
-struct PaneResult {
-    pane: RawPaneInfo,
+struct ClientArea {
+    x: u16,
+    width: u16,
 }
 
 #[derive(Deserialize)]
-struct RawPaneInfo {
-    pane_id: String,
-    cwd: Option<String>,
-    scroll: Option<RawScroll>,
+struct OkEnvelope {
+    result: OkResult,
 }
 
 #[derive(Deserialize)]
-struct RawScroll {
-    viewport_rows: u64,
-}
-
-#[derive(Deserialize)]
-struct PluginPaneOpenEnvelope {
-    result: PluginPaneOpenResult,
-}
-
-#[derive(Deserialize)]
-struct PluginPaneOpenResult {
-    plugin_pane: RawPluginPane,
-}
-
-#[derive(Deserialize)]
-struct RawPluginPane {
-    pane: RawPluginPaneInfo,
-}
-
-#[derive(Deserialize)]
-struct RawPluginPaneInfo {
-    pane_id: String,
-}
-
-#[derive(Deserialize)]
-struct PluginPaneCloseEnvelope {
-    result: PluginPaneCloseResult,
-}
-
-#[derive(Deserialize)]
-struct PluginPaneCloseResult {
-    pane_id: String,
-}
-
-#[derive(Deserialize)]
-struct ErrorEnvelope {
-    error: ErrorBody,
-}
-
-#[derive(Deserialize)]
-struct ErrorBody {
-    code: String,
+struct OkResult {
+    #[serde(rename = "type")]
+    kind: String,
 }
 
 #[cfg(test)]
@@ -334,7 +233,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(context.source_pane_id().unwrap(), "w2:p1");
-        assert_eq!(context.focused_pane_cwd.as_deref(), Some("/tmp/project"));
         assert!(InvocationContext::parse("{}")
             .unwrap()
             .source_pane_id()

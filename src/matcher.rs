@@ -3,17 +3,16 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use unicode_width::UnicodeWidthStr;
 
-use crate::config::PatternDefinition;
+use crate::{cells, config::PatternDefinition};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Occurrence {
-    pub row: u16,
-    pub highlight_col: u16,
-    pub highlight_width: u16,
-    pub hint_col: u16,
-    pub hint_width: u16,
+    pub row: usize,
+    pub highlight_col: usize,
+    pub highlight_width: usize,
+    pub hint_col: usize,
+    pub hint_width: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -69,7 +68,7 @@ pub fn find_targets(text: &str, patterns: &[PatternDefinition]) -> Result<Vec<Ta
             }
             occupied_until = candidate.full_end;
             let occurrence = Occurrence {
-                row: saturating_u16(row),
+                row,
                 highlight_col: cell_width(&line[..candidate.full_start]),
                 highlight_width: cell_width(&line[candidate.full_start..candidate.full_end]).max(1),
                 hint_col: cell_width(&line[..candidate.capture_start]),
@@ -101,12 +100,8 @@ struct Candidate {
     text: String,
 }
 
-fn cell_width(text: &str) -> u16 {
-    saturating_u16(UnicodeWidthStr::width(text))
-}
-
-fn saturating_u16(value: usize) -> u16 {
-    u16::try_from(value).unwrap_or(u16::MAX)
+fn cell_width(text: &str) -> usize {
+    cells::width(text)
 }
 
 #[cfg(test)]
@@ -177,6 +172,21 @@ mod tests {
 
         assert_eq!(targets[0].occurrences[0].hint_col, 9);
         assert_eq!(targets[0].occurrences[0].hint_width, 6);
+    }
+
+    #[test]
+    fn coordinates_match_ratatui_halfwidth_sound_mark_cells() {
+        let targets = find_targets("ｶﾞ /tmp/a", &[pattern("path", r"/[^ ]+")]).unwrap();
+
+        assert_eq!(targets[0].occurrences[0].hint_col, 3);
+    }
+
+    #[test]
+    fn source_coordinates_do_not_saturate_on_long_logical_lines() {
+        let text = format!("{} /tmp/a", "x".repeat(70_000));
+        let targets = find_targets(&text, &[pattern("path", r"/[^ ]+")]).unwrap();
+
+        assert_eq!(targets[0].occurrences[0].hint_col as usize, 70_001);
     }
 
     #[test]

@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufReader, BufWriter, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -10,80 +9,23 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::herdr::{ClosePluginPaneOutcome, Herdr, InvocationContext, Layout};
-use crate::hints::generate_hints;
-use crate::matcher::{find_targets, Occurrence};
+use crate::herdr::{Herdr, InvocationContext};
+use crate::matcher::{find_targets, Target};
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct PaneSnapshot {
-    pub pane_id: String,
-    pub viewport_rows: u16,
-    pub text: String,
-    pub ansi: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct TargetOccurrence {
-    pub pane_id: String,
-    pub occurrence: Occurrence,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct TabTarget {
-    pub text: String,
-    pub occurrences: Vec<TargetOccurrence>,
-}
+pub const CAPTURE_ROWS: u32 = 1_000;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RunSnapshot {
     pub source_pane_id: String,
-    pub source_cwd: Option<String>,
-    pub layout: Layout,
-    pub panes: Vec<PaneSnapshot>,
-    pub targets: Vec<TabTarget>,
-    pub hints: Vec<String>,
-}
-
-fn find_tab_targets(panes: &[PaneSnapshot], config: &Config) -> Result<Vec<TabTarget>> {
-    let mut targets = Vec::<TabTarget>::new();
-    let mut target_by_text = HashMap::<String, usize>::new();
-
-    for pane in panes {
-        for target in find_targets(&pane.text, &config.patterns)? {
-            let occurrences = target
-                .occurrences
-                .into_iter()
-                .map(|occurrence| TargetOccurrence {
-                    pane_id: pane.pane_id.clone(),
-                    occurrence,
-                });
-            if let Some(index) = target_by_text.get(&target.text).copied() {
-                targets[index].occurrences.extend(occurrences);
-            } else {
-                let index = targets.len();
-                target_by_text.insert(target.text.clone(), index);
-                targets.push(TabTarget {
-                    text: target.text,
-                    occurrences: occurrences.collect(),
-                });
-            }
-        }
-    }
-
-    Ok(targets)
+    pub text: String,
+    pub ansi: String,
+    pub targets: Vec<Target>,
+    pub alphabet: Vec<char>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LaunchOutcome {
     Opened { run_id: String },
-    Closed { pane_id: String },
-    NoMatches,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-struct ActivePicker {
-    run_id: String,
-    pane_id: String,
 }
 
 #[derive(Clone, Debug)]
@@ -177,60 +119,11 @@ impl RunStore {
         }
     }
 
-    pub fn set_active_picker(&self, run_id: &str, pane_id: &str) -> Result<()> {
-        self.path(run_id)?;
-        if pane_id.is_empty() || pane_id.chars().any(char::is_control) {
-            bail!("invalid Talon picker pane ID");
-        }
-        let active = ActivePicker {
-            run_id: run_id.to_string(),
-            pane_id: pane_id.to_string(),
-        };
-        let final_path = self.active_picker_path();
-        let temporary_path = self
-            .root
-            .join(format!(".active-picker.{}.tmp", std::process::id()));
-        let result: Result<()> = (|| {
-            let file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&temporary_path)?;
-            let mut writer = BufWriter::new(file);
-            serde_json::to_writer(&mut writer, &active)?;
-            writer.flush()?;
-            writer.get_ref().sync_all()?;
-            fs::rename(&temporary_path, &final_path)?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary_path);
-        }
-        result.context("failed to record active Talon picker")
-    }
-
-    pub fn clear_active_picker(&self, run_id: &str) -> Result<()> {
-        let Some(active) = self.active_picker()? else {
-            return Ok(());
-        };
-        if active.run_id != run_id {
-            return Ok(());
-        }
-        match fs::remove_file(self.active_picker_path()) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error).context("failed to clear active Talon picker"),
-        }
-    }
-
     pub fn reap_stale(&self, age: Duration) -> Result<usize> {
         let now = SystemTime::now();
         let mut removed = 0;
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
-            if entry.file_name() == ".active-picker.json" {
-                continue;
-            }
             let metadata = fs::symlink_metadata(entry.path())?;
             if metadata.file_type().is_symlink() || !metadata.is_file() {
                 continue;
@@ -255,29 +148,6 @@ impl RunStore {
         }
         Ok(self.root.join(format!("{run_id}.json")))
     }
-
-    fn active_picker(&self) -> Result<Option<ActivePicker>> {
-        let path = self.active_picker_path();
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error).context("failed to inspect active Talon picker"),
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            bail!("active Talon picker record is not a regular file");
-        }
-        let active: ActivePicker = serde_json::from_reader(BufReader::new(fs::File::open(path)?))
-            .context("failed to decode active Talon picker")?;
-        self.path(&active.run_id)?;
-        if active.pane_id.is_empty() || active.pane_id.chars().any(char::is_control) {
-            bail!("active Talon picker has an invalid pane ID");
-        }
-        Ok(Some(active))
-    }
-
-    fn active_picker_path(&self) -> PathBuf {
-        self.root.join(".active-picker.json")
-    }
 }
 
 pub fn launch(
@@ -286,72 +156,56 @@ pub fn launch(
     config: &Config,
     store: &RunStore,
 ) -> Result<LaunchOutcome> {
-    if let Some(active) = store.active_picker()? {
-        match herdr.close_plugin_pane(&active.pane_id)? {
-            ClosePluginPaneOutcome::Closed => {
-                store.clear_active_picker(&active.run_id)?;
-                return Ok(LaunchOutcome::Closed {
-                    pane_id: active.pane_id,
-                });
-            }
-            ClosePluginPaneOutcome::NotFound => {
-                store.clear_active_picker(&active.run_id)?;
-            }
-        }
-    }
     let source_pane_id = context.source_pane_id()?;
-    let layout = herdr.layout(source_pane_id)?;
-    if !layout
-        .panes
-        .iter()
-        .any(|pane| pane.pane_id == source_pane_id)
-    {
-        bail!("focused pane is missing from its tab layout");
-    }
-
-    let mut panes = Vec::with_capacity(layout.panes.len());
-    let mut source_cwd = context.focused_pane_cwd.clone();
-    for pane in &layout.panes {
-        let info = herdr.pane_info(&pane.pane_id)?;
-        if pane.pane_id == source_pane_id && source_cwd.is_none() {
-            source_cwd = info.cwd.clone();
-        }
-        panes.push(PaneSnapshot {
-            pane_id: pane.pane_id.clone(),
-            viewport_rows: info.viewport_rows,
-            text: herdr.read_visible(&pane.pane_id, false)?,
-            ansi: herdr.read_visible(&pane.pane_id, true)?,
-        });
-    }
-
-    let targets = find_tab_targets(&panes, config)?;
-    if targets.is_empty() {
-        herdr.notify("No targets in the visible tab")?;
-        return Ok(LaunchOutcome::NoMatches);
-    }
-    let hints = generate_hints(&config.alphabet, targets.len())?;
+    let client_width = herdr.client_width(source_pane_id)?;
+    let (text, ansi) = capture_history(herdr, source_pane_id)?;
+    let targets = find_targets(&text, &config.patterns)?;
     let snapshot = RunSnapshot {
         source_pane_id: source_pane_id.to_string(),
-        source_cwd,
-        layout,
-        panes,
+        text,
+        ansi,
         targets,
-        hints,
+        alphabet: config.alphabet.clone(),
     };
     let run_id = store.write(&snapshot)?;
-    let pane_id = match herdr.open_picker(&run_id) {
-        Ok(pane_id) => pane_id,
+    let popup = config.popup(Some(client_width));
+    match herdr.open_picker(&run_id, &popup) {
+        Ok(()) => {}
         Err(error) => {
             let _ = store.remove(&run_id);
             return Err(error);
         }
-    };
-    if let Err(error) = store.set_active_picker(&run_id, &pane_id) {
-        let _ = herdr.close_plugin_pane(&pane_id);
-        let _ = store.remove(&run_id);
-        return Err(error);
     }
     Ok(LaunchOutcome::Opened { run_id })
+}
+
+fn capture_history(herdr: &Herdr, pane_id: &str) -> Result<(String, String)> {
+    let recent_text =
+        normalize_newlines(herdr.read_recent_unwrapped(pane_id, false, CAPTURE_ROWS)?);
+    let recent_ansi =
+        normalize_newlines(herdr.read_recent_unwrapped(pane_id, true, CAPTURE_ROWS)?);
+    let (text, ansi) = if recent_text.is_empty() {
+        (
+            normalize_newlines(herdr.read_visible(pane_id, false)?),
+            normalize_newlines(herdr.read_visible(pane_id, true)?),
+        )
+    } else {
+        (recent_text, recent_ansi)
+    };
+    let ansi = if row_count(&ansi) == row_count(&text) {
+        ansi
+    } else {
+        text.clone()
+    };
+    Ok((text, ansi))
+}
+
+fn normalize_newlines(text: String) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn row_count(text: &str) -> usize {
+    text.split_terminator('\n').count().max(1)
 }
 
 pub fn launch_with_reporting(
@@ -398,7 +252,6 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::herdr::{LayoutPane, Rect};
     use crate::matcher::Occurrence;
 
     use super::*;
@@ -406,49 +259,19 @@ mod tests {
     fn sample_snapshot() -> RunSnapshot {
         RunSnapshot {
             source_pane_id: "w1:p1".into(),
-            source_cwd: Some("/tmp/project".into()),
-            layout: Layout {
-                workspace_id: "w1".into(),
-                tab_id: "w1:t1".into(),
-                zoomed: false,
-                area: Rect {
-                    x: 30,
-                    y: 1,
-                    width: 100,
-                    height: 30,
-                },
-                focused_pane_id: "w1:p1".into(),
-                panes: vec![LayoutPane {
-                    pane_id: "w1:p1".into(),
-                    focused: true,
-                    rect: Rect {
-                        x: 30,
-                        y: 1,
-                        width: 100,
-                        height: 30,
-                    },
-                }],
-            },
-            panes: vec![PaneSnapshot {
-                pane_id: "w1:p1".into(),
-                viewport_rows: 30,
-                text: "deadbeef\n".into(),
-                ansi: "\u{1b}[33mdeadbeef\u{1b}[0m\n".into(),
-            }],
-            targets: vec![TabTarget {
+            text: "deadbeef\n".into(),
+            ansi: "\u{1b}[33mdeadbeef\u{1b}[0m\n".into(),
+            targets: vec![Target {
                 text: "deadbeef".into(),
-                occurrences: vec![TargetOccurrence {
-                    pane_id: "w1:p1".into(),
-                    occurrence: Occurrence {
-                        row: 0,
-                        highlight_col: 0,
-                        highlight_width: 8,
-                        hint_col: 0,
-                        hint_width: 8,
-                    },
+                occurrences: vec![Occurrence {
+                    row: 0,
+                    highlight_col: 0,
+                    highlight_width: 8,
+                    hint_col: 0,
+                    hint_width: 8,
                 }],
             }],
-            hints: vec!["a".into()],
+            alphabet: vec!['a', 's'],
         }
     }
 
@@ -512,22 +335,5 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), dir.path().join("runs")).unwrap();
 
         assert!(RunStore::new(dir.path()).is_err());
-    }
-
-    #[test]
-    fn active_picker_record_is_private_and_cleared_by_its_run() {
-        let dir = tempdir().unwrap();
-        let store = RunStore::new(dir.path()).unwrap();
-        let run_id = Uuid::new_v4().to_string();
-        let other_run_id = Uuid::new_v4().to_string();
-        let path = store.active_picker_path();
-
-        store.set_active_picker(&run_id, "w1:p3").unwrap();
-
-        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
-        store.clear_active_picker(&other_run_id).unwrap();
-        assert!(path.exists());
-        store.clear_active_picker(&run_id).unwrap();
-        assert!(!path.exists());
     }
 }
