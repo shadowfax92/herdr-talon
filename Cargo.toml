@@ -1,6 +1,6 @@
 [package]
 name = "herdr-talon"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Focused terminal history picker for Herdr"
 license = "MIT"
@@ -17,6 +17,4 @@ toml = "1.1"
 toml_edit = "0.24"
 unicode-segmentation = "1.13"
 uuid = { version = "1.22", features = ["v4"] }
-
-[dev-dependencies]
 tempfile = "3.23"

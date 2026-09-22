@@ -26,7 +26,11 @@ The popup also works as a keyboard-driven history viewer when no value is detect
 
 ## Install
 
-Requires macOS, [Herdr](https://herdr.dev) 0.7.5 or newer, and a Rust toolchain.
+Requires macOS or Linux (including WSL), [Herdr](https://herdr.dev) 0.7.5 or newer, and a Rust toolchain.
+
+On Windows, run Herdr and this plugin inside WSL. Native Windows is not supported.
+
+Clipboard copying uses `pbcopy` on macOS, [wl-copy](https://github.com/bugaevc/wl-clipboard) on Wayland, or [xclip](https://github.com/astrand/xclip)/[xsel](https://github.com/kfish/xsel) on X11. Install the matching Linux utility. WSL needs a graphical clipboard session such as WSLg. Talon preserves Unicode and trailing newlines and reports unavailable clipboard services in the popup.
 
 ```sh
 herdr plugin install shadowfax92/herdr-talon
@@ -87,7 +91,7 @@ A selection can cross any number of wrapped visual rows. Talon copies a newline 
 
 Press `/`, type a case-sensitive query, then press `Enter`. The first match at or below the current logical line is previewed as the query changes. After accepting, use `n` and `N` to cycle with wraparound. `Esc` cancels the search and restores the original cursor.
 
-If `pbcopy` fails, Talon keeps the popup open and shows the error in the footer so the selection is not lost.
+If copying fails, Talon keeps the popup open and shows the error in the footer so the selection is not lost.
 
 ## Recognized targets
 
@@ -175,7 +179,7 @@ Widths from 351 through 399 cells use the default. Popup dimensions can be perce
 
 Talon reads plain and ANSI `recent-unwrapped` output from the invoking pane. Plain text supplies stable match and selection coordinates; ANSI spans preserve terminal styling when the two representations align. A custom terminal-cell wrap table maps every visual row back to its logical source range, so resize, highlight, search, and selection all use one coordinate model.
 
-The launch action records the frozen capture in a private one-shot handoff and opens the picker as a focused Herdr popup. The picker claims and removes the handoff, writes successful completions through `pbcopy`, then exits so Herdr dismisses the popup. Herdr routes every key to an open modal popup, so close Talon with `q`, `Esc`, or `Ctrl-c`; a launch attempted while another modal is open fails safely without closing it.
+The launch action records the frozen capture in a private one-shot handoff and opens the picker as a focused Herdr popup. The picker claims and removes the handoff, writes successful completions through the host clipboard utility, then exits so Herdr dismisses the popup. Herdr routes every key to an open modal popup, so close Talon with `q`, `Esc`, or `Ctrl-c`; a launch attempted while another modal is open fails safely without closing it.
 
 ## Limits
 

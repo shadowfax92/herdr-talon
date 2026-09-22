@@ -1,9 +1,9 @@
 id = "shadowfax.talon"
 name = "Talon"
-version = "0.2.0"
+version = "0.2.1"
 description = "Browse focused pane history and copy values with keyboard hints."
 min_herdr_version = "0.7.5"
-platforms = ["macos"]
+platforms = ["macos", "linux"]
 
 [[build]]
 command = ["cargo", "build", "--release", "--locked"]
