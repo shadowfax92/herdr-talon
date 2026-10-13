@@ -26,16 +26,24 @@ fn manifest_declares_the_complete_plugin_contract() {
     let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
 
     assert_eq!(manifest["id"].as_str(), Some("shadowfax.talon"));
-    assert_eq!(manifest["version"].as_str(), Some("0.2.0"));
+    // Herdr reads the plugin version from the manifest while Cargo stamps the
+    // binary, so a release must bump both together.
+    assert_eq!(
+        manifest["version"].as_str(),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
     assert_eq!(
         manifest["description"].as_str(),
         Some("Browse focused pane history and copy values with keyboard hints.")
     );
     assert_eq!(manifest["min_herdr_version"].as_str(), Some("0.7.5"));
-    assert_eq!(
-        manifest["platforms"].as_array().unwrap()[0].as_str(),
-        Some("macos")
-    );
+    let platforms: Vec<_> = manifest["platforms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|platform| platform.as_str().unwrap())
+        .collect();
+    assert_eq!(platforms, ["macos", "linux"]);
     assert_eq!(manifest["build"].as_array().unwrap().len(), 1);
     assert_eq!(manifest["actions"].as_array().unwrap().len(), 2);
     assert_eq!(manifest["panes"].as_array().unwrap().len(), 1);
